@@ -1,5 +1,5 @@
 {
-  "name": "@vlabo/cspell-lsp",
+  "name": "@jks15satoshi/cspell-lsp",
   "version": "1.1.4",
   "description": "This extension performs spell checking in source code files, using the [cspell library](https://cspell.org/).",
   "main": "index.js",
@@ -7,39 +7,57 @@
   "bin": {
     "cspell-lsp": "dist/cspell-lsp.js"
   },
-  "files": [],
-  "author": "vlabo",
+  "files": [
+    "NOTICE"
+  ],
+  "author": "Satoshi Jek",
   "license": "GPL-3.0-only",
-  "homepage": "https://github.com/vlabo/cspell-lsp",
+  "homepage": "https://github.com/jks15satoshi/cspell-lsp",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@types/command-line-args": "^5.2.3",
-    "@vlabo/cspell-lsp": "^1.0.0",
     "command-line-args": "^6.0.1",
     "comment-json": "^4.2.5",
-    "cspell-lib": "^8.17.1",
+    "cspell": "^10.5.2",
+    "cspell-lib": "^10.5.2",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.12",
     "vscode-languageserver-types": "^3.17.5"
   },
   "devDependencies": {
-    "@types/node": "^22.10.5"
+    "@types/node": "^22.10.5",
+    "oxfmt": "^0.80.0",
+    "oxlint": "^1.95.0",
+    "typescript": "^5.9.3"
   },
   "scripts": {
     "build": "bun build ./src/main.ts --outfile=dist/cspell-lsp.js --target=node",
     "start": "node dist/cspell-lsp.js",
     "test": "echo \"Error: no test specified\" && exit 1",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run lint && npm run format:check",
     "prepublishOnly": "npm run build"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vlabo/cspell-lsp.git"
+    "url": "git+https://github.com/jks15satoshi/cspell-lsp.git"
   },
   "keywords": [
     "spellcheck",
     "spell",
-    "check"
+    "check",
+    "lsp"
   ],
   "bugs": {
-    "url": "https://github.com/vlabo/cspell-lsp/issues"
+    "url": "https://github.com/jks15satoshi/cspell-lsp/issues"
   }
 }

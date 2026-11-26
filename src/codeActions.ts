@@ -1,18 +1,81 @@
-import type { SpellingDictionary, SuggestionResult, SuggestOptions } from 'cspell-lib';
-import { CompoundWordsMethod,  getDictionary, IssueType, Text } from 'cspell-lib';
-import type { CodeActionParams, Range as LangServerRange, TextDocuments } from 'vscode-languageserver/node.js';
-import type { Position, TextDocument } from 'vscode-languageserver-textdocument';
+import type {
+  SpellingDictionary,
+  SuggestionResult,
+  SuggestOptions,
+} from 'cspell-lib';
+import { CompoundWordsMethod, getDictionary, Text } from 'cspell-lib';
+import type {
+  CodeActionParams,
+  Range as LangServerRange,
+  TextDocuments,
+} from 'vscode-languageserver/node.js';
+import type {
+  Position,
+  TextDocument,
+} from 'vscode-languageserver-textdocument';
 import { Diagnostic, WorkspaceEdit } from 'vscode-languageserver-types';
-import { CodeAction, CodeActionKind, TextEdit } from 'vscode-languageserver-types';
+import {
+  CodeAction,
+  CodeActionKind,
+  TextEdit,
+} from 'vscode-languageserver-types';
 
 import * as Validator from './validator.js';
 
 import { getSettingsForDocument } from './main';
 
-function extractDiagnosticData(diag: Diagnostic): Validator.SpellCheckerDiagnosticData {
+function extractDiagnosticData(
+  diag: Diagnostic,
+): Validator.SpellCheckerDiagnosticData {
   const { data } = diag;
   if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
   return data as Validator.SpellCheckerDiagnosticData;
+}
+
+function replaceText(range: LangServerRange, text?: string) {
+  return TextEdit.replace(range, text || '');
+}
+
+// A helper function to check if a position is inside a range.
+function isPositionInRange(pos: Position, range: LangServerRange) {
+  return (
+    pos.line === range.start.line &&
+    pos.character >= range.start.character &&
+    pos.character <= range.end.character
+  );
+}
+
+function suggestionToTitle(sug: Validator.Suggestion): string | undefined {
+  return sug.word + (sug.isPreferred ? ' (preferred)' : '');
+}
+
+function createWorkspaceAction(
+  title: string,
+  workspaceEdit: WorkspaceEdit,
+  diags: Diagnostic[] | undefined,
+  isPreferred?: boolean,
+): CodeAction {
+  const action = CodeAction.create(
+    title,
+    workspaceEdit,
+    CodeActionKind.QuickFix,
+  );
+  action.diagnostics = diags;
+  if (isPreferred) {
+    action.isPreferred = true;
+  }
+  return action;
+}
+
+function isWordLikeSelection(
+  doc: TextDocument,
+  range: LangServerRange,
+): boolean {
+  if (range.start.line !== range.end.line) return false;
+
+  const text = doc.getText(range);
+  const hasSpace = /\s/.test(text.trim());
+  return !hasSpace;
 }
 
 export function createOnCodeActionHandler(
@@ -26,9 +89,7 @@ export function createOnCodeActionHandler(
 class CodeActionHandler {
   private sugGen: SuggestionGenerator;
 
-  constructor(
-    readonly documents: TextDocuments<TextDocument>,
-  ) {
+  constructor(readonly documents: TextDocuments<TextDocument>) {
     this.sugGen = new SuggestionGenerator();
   }
 
@@ -55,53 +116,65 @@ class CodeActionHandler {
       textDocument,
     };
 
-    const actions = await this.handlerCSpell({ ...ctx, diags: spellCheckerDiags });
+    const actions = await this.handlerCSpell({
+      ...ctx,
+      diags: spellCheckerDiags,
+    });
     const arg = {
       uri: params.textDocument.uri,
       range: diagnostics[0].range,
-      message: diagnostics[0].message
-    }
+      message: diagnostics[0].message,
+    };
 
     actions.push({
-      title: "Add to user words in config",
-       kind: CodeActionKind.QuickFix,
-       diagnostics: diagnostics,
-       command: {
-        title: "Add to user words in config",
-        command: "AddToUserWordsConfig",
-        arguments: [arg]
-       },
-    });
-    actions.push({
-      title: "Add to workspace words in config",
+      title: 'Add to user words in config',
       kind: CodeActionKind.QuickFix,
       diagnostics: diagnostics,
       command: {
-        title: "Add to workspace words in config",
-        command: "AddToWorkspaceWordsConfig",
-        arguments: [arg]
+        title: 'Add to user words in config',
+        command: 'AddToUserWordsConfig',
+        arguments: [arg],
+      },
+    });
+    actions.push({
+      title: 'Add to workspace words in config',
+      kind: CodeActionKind.QuickFix,
+      diagnostics: diagnostics,
+      command: {
+        title: 'Add to workspace words in config',
+        command: 'AddToWorkspaceWordsConfig',
+        arguments: [arg],
       },
     });
 
     const settings = await getSettingsForDocument(ctx.textDocument);
     const dictionaries = settings.dictionaries ?? [];
-    if (settings.dictionaryDefinitions && settings.dictionaryDefinitions.length > 0) {
+    if (
+      settings.dictionaryDefinitions &&
+      settings.dictionaryDefinitions.length > 0
+    ) {
       const mutableDictionaries = settings.dictionaryDefinitions
         .filter((dict) => 'path' in dict && 'addWords' in dict && dict.addWords)
-        .filter((dict) => dictionaries.indexOf(dict.name) >= 0 && dictionaries.indexOf(`!${dict.name}`) < 0);
+        .filter(
+          (dict) =>
+            dictionaries.indexOf(dict.name) >= 0 &&
+            dictionaries.indexOf(`!${dict.name}`) < 0,
+        );
       const customDictionaryActions = mutableDictionaries.map((dict) => ({
         title: `Add to ${dict.name} dictionary`,
         kind: CodeActionKind.QuickFix,
         diagnostics: diagnostics,
         command: {
           title: `Add to ${dict.name} dictionary`,
-          command: "AddToCustomDictionary",
-          arguments: [{
-            ...arg,
-            name: dict.name,
-            path: dict.path
-          }]
-        }
+          command: 'AddToCustomDictionary',
+          arguments: [
+            {
+              ...arg,
+              name: dict.name,
+              path: dict.path,
+            },
+          ],
+        },
       }));
       actions.push(...customDictionaryActions);
     }
@@ -116,45 +189,44 @@ class CodeActionHandler {
     const cursorRange = params.range;
     if (!spellCheckerDiags.length) return [];
 
-    function replaceText(range: LangServerRange, text?: string) {
-      return TextEdit.replace(range, text || '');
-    }
-
     const getSuggestions = (word: string) => {
       return this.sugGen.genWordSuggestions(textDocument, word);
     };
 
-    // A helper function to check if a position is inside a range.
-    function isPositionInRange(pos: Position, range: LangServerRange) {
-        return (
-            pos.line === range.start.line &&
-            pos.character >= range.start.character &&
-            pos.character <= range.end.character
-        );
-    }
-
     // Find the specific diagnostic the user is pointing at.
     const relevantDiagnostics = spellCheckerDiags.filter((diag: Diagnostic) =>
-        isPositionInRange(cursorRange.start, diag.range)
+      isPositionInRange(cursorRange.start, diag.range),
     );
 
-    async function genCodeActionsForSuggestions(_dictionary: SpellingDictionary) {
+    async function genCodeActionsForSuggestions(
+      _dictionary: SpellingDictionary,
+    ) {
       let diagWord: string | undefined;
       for (const diag of relevantDiagnostics) {
-        const { issueType = IssueType.spelling, suggestions } = extractDiagnosticData(diag);
+        const { suggestions } = extractDiagnosticData(diag);
         const srcWord = textDocument.getText(diag.range);
         diagWord = diagWord || srcWord;
-        const sugs: Validator.Suggestion[] = suggestions ?? (await getSuggestions(srcWord)) ?? [];
-        sugs.map(({ word, isPreferred }) => ({ word: Text.isLowerCase(word) ? Text.matchCase(srcWord, word) : word, isPreferred }))
+        const sugs: Validator.Suggestion[] =
+          suggestions ?? (await getSuggestions(srcWord)) ?? [];
+        sugs
+          .map(({ word, isPreferred }) => ({
+            word: Text.isLowerCase(word) ? Text.matchCase(srcWord, word) : word,
+            isPreferred,
+          }))
           .forEach((sug) => {
             const sugWord = sug.word;
-            const title = suggestionToTitle(sug, issueType);
+            const title = suggestionToTitle(sug);
             if (!title) return;
-            var workspaceEdit: WorkspaceEdit = {
-              changes: { [uri]: [replaceText(diag.range, sugWord)] }
+            const workspaceEdit: WorkspaceEdit = {
+              changes: { [uri]: [replaceText(diag.range, sugWord)] },
             };
 
-            const action = crateWorkspaceAction(title, workspaceEdit, [diag], sug.isPreferred);
+            const action = createWorkspaceAction(
+              title,
+              workspaceEdit,
+              [diag],
+              sug.isPreferred,
+            );
             actions.push(action);
           });
       }
@@ -164,7 +236,6 @@ class CodeActionHandler {
     const dictionary = await getDictionary({});
 
     return genCodeActionsForSuggestions(dictionary);
-
   }
 }
 
@@ -174,35 +245,15 @@ interface CodeActionHandlerContext {
   textDocument: TextDocument;
 }
 
-function suggestionToTitle(sug: Validator.Suggestion, _: IssueType): string | undefined {
-  return sug.word + (sug.isPreferred ? ' (preferred)' : '');
-}
-
-function crateWorkspaceAction(title: string, workspaceEdit: WorkspaceEdit, diags: Diagnostic[] | undefined, isPreferred?: boolean): CodeAction {
-  const action = CodeAction.create(title, workspaceEdit, CodeActionKind.QuickFix);
-  action.diagnostics = diags;
-  if (isPreferred) {
-    action.isPreferred = true;
-  }
-  return action;
-}
-
-function isWordLikeSelection(doc: TextDocument, range: LangServerRange): boolean {
-  if (range.start.line !== range.end.line) return false;
-
-  const text = doc.getText(range);
-  const hasSpace = /\s/.test(text.trim());
-  return !hasSpace;
-}
-
-
 const wordLengthForLimitingSuggestions = 15;
 const maxNumberOfSuggestionsForLongWords = 1;
 const regexJoinedWords = /[+]/g;
 
 class SuggestionGenerator {
-
-  async genSuggestions(doc: TextDocument, word: string): Promise<SuggestionResult[]> {
+  async genSuggestions(
+    doc: TextDocument,
+    word: string,
+  ): Promise<SuggestionResult[]> {
     const settings = await getSettingsForDocument(doc);
 
     const dictionary = await getDictionary(settings);
@@ -211,7 +262,9 @@ class SuggestionGenerator {
       return [];
     }
     const numSugs =
-      word.length > wordLengthForLimitingSuggestions ? Math.min(maxNumberOfSuggestionsForLongWords, numSuggestions) : numSuggestions;
+      word.length > wordLengthForLimitingSuggestions
+        ? Math.min(maxNumberOfSuggestionsForLongWords, numSuggestions)
+        : numSuggestions;
     const options: SuggestOptions = {
       numChanges: 3,
       numSuggestions: numSugs,
@@ -221,10 +274,20 @@ class SuggestionGenerator {
       // Do not included ties, it could create a long list of suggestions.
       includeTies: false,
     };
-    return dictionary.suggest(word, options).map((s: any) => ({ ...s, word: s.word.replace(regexJoinedWords, '') }));
+    return dictionary
+      .suggest(word, options)
+      .map((s) => ({ ...s, word: s.word.replace(regexJoinedWords, '') }));
   }
 
-  async genWordSuggestions(doc: TextDocument, word: string): Promise<Validator.Suggestion[]> {
-    return (await this.genSuggestions(doc, word)).map(({ word, isPreferred }) => ({ word, isPreferred }));
+  async genWordSuggestions(
+    doc: TextDocument,
+    word: string,
+  ): Promise<Validator.Suggestion[]> {
+    return (await this.genSuggestions(doc, word)).map(
+      ({ word: suggestionWord, isPreferred }) => ({
+        word: suggestionWord,
+        isPreferred,
+      }),
+    );
   }
 }
