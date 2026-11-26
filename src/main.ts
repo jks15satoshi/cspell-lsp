@@ -12,14 +12,14 @@ import {
   ProposedFeatures,
   TextDocuments,
   TextDocumentSyncKind,
-} from "vscode-languageserver/node.js";
+} from 'vscode-languageserver/node.js';
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { parse as parseJsonc, stringify as stringifyJsonc } from 'comment-json';
 
-import { TextDocument } from "vscode-languageserver-textdocument";
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import {
   constructSettingsForText,
   CSpellSettings,
@@ -30,10 +30,10 @@ import {
   mergeSettings,
   readSettings,
   refreshDictionaryCache,
-} from "cspell-lib";
+} from 'cspell-lib';
 
 import * as Validator from './validator.js';
-import { createOnCodeActionHandler } from "./codeActions.js";
+import { createOnCodeActionHandler } from './codeActions.js';
 import commandLineArgs from 'command-line-args';
 
 const optionDefinitions = [
@@ -46,7 +46,11 @@ const options = commandLineArgs(optionDefinitions);
 
 let defaultSettings: CSpellUserSettings = {};
 
-const COMMANDS = ['AddToUserWordsConfig', 'AddToWorkspaceWordsConfig', 'AddToCustomDictionary']
+const COMMANDS = [
+  'AddToUserWordsConfig',
+  'AddToWorkspaceWordsConfig',
+  'AddToCustomDictionary',
+];
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -59,13 +63,19 @@ let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
 let workspaceRoot: string | undefined;
 
-const watchingCustomDictionaries: Set<string> = new Set()
+const watchingCustomDictionaries: Set<string> = new Set();
 
 connection.onInitialize((params: InitializeParams) => {
   defaultSettings = params.initializationOptions?.defaultSettings ?? {};
 
-  hasConfigurationCapability = !!(params.capabilities.workspace && !!params.capabilities.workspace.configuration);
-  hasWorkspaceFolderCapability = !!(params.capabilities.workspace && !!params.capabilities.workspace.workspaceFolders);
+  hasConfigurationCapability = !!(
+    params.capabilities.workspace &&
+    !!params.capabilities.workspace.configuration
+  );
+  hasWorkspaceFolderCapability = !!(
+    params.capabilities.workspace &&
+    !!params.capabilities.workspace.workspaceFolders
+  );
 
   if (params.workspaceFolders?.length) {
     workspaceRoot = fileURLToPath(params.workspaceFolders[0].uri);
@@ -88,7 +98,7 @@ connection.onInitialize((params: InitializeParams) => {
       },
       executeCommandProvider: {
         commands: COMMANDS,
-      }
+      },
     },
   };
   return result;
@@ -104,11 +114,14 @@ connection.onInitialized(async () => {
   }
   if (hasWorkspaceFolderCapability) {
     connection.workspace.onDidChangeWorkspaceFolders((_event) => {
-      connection.console.log("Workspace folder change event received.");
+      connection.console.log('Workspace folder change event received.');
     });
   }
 
-  const watchers: FileSystemWatcher[] = [{ globPattern: '**/cspell.{json,yaml,yml}' }, { globPattern: '**/.cspell.json' }];
+  const watchers: FileSystemWatcher[] = [
+    { globPattern: '**/cspell.{json,yaml,yml}' },
+    { globPattern: '**/.cspell.json' },
+  ];
   if (options.config) {
     let baseUri: string;
     let pattern: string;
@@ -117,7 +130,9 @@ connection.onInitialized(async () => {
       pattern = path.basename(options.config);
     } else {
       baseUri = 'file://' + process.cwd();
-      pattern = options.config.startsWith('.' + path.sep) ? options.config.substring(2) : options.config;
+      pattern = options.config.startsWith('.' + path.sep)
+        ? options.config.substring(2)
+        : options.config;
     }
     watchers.push({ globPattern: { baseUri, pattern } });
   }
@@ -129,16 +144,24 @@ connection.onInitialized(async () => {
     watchers.push({ globPattern: { baseUri, pattern: 'cspell.json' } });
   }
   // Watch for changes in cspell config files
-  connection.client.register(DidChangeWatchedFilesNotification.type, { watchers });
+  connection.client.register(DidChangeWatchedFilesNotification.type, {
+    watchers,
+  });
 });
 
 connection.onDidChangeWatchedFiles((change) => {
-    connection.console.log('Configuration file changed. Revalidating all open documents.');
-    if (change.changes.some((c) => watchingCustomDictionaries.has(c.uri.substring('file://'.length)))) {
-      refreshDictionaryCache(0).then(() => revalidateAllOpenDocuments());
-    } else {
-      revalidateAllOpenDocuments();
-    }
+  connection.console.log(
+    'Configuration file changed. Revalidating all open documents.',
+  );
+  if (
+    change.changes.some((c) =>
+      watchingCustomDictionaries.has(c.uri.substring('file://'.length)),
+    )
+  ) {
+    refreshDictionaryCache(0).then(() => revalidateAllOpenDocuments());
+  } else {
+    revalidateAllOpenDocuments();
+  }
 });
 
 connection.onCodeAction(createOnCodeActionHandler(documents));
@@ -157,11 +180,11 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 }
 
 function revalidateAllOpenDocuments() {
-    settingsCache.clear();
-    getDefaultConfigLoader().clearCachedSettingsFiles();
-    for (const doc of documents.all()) {
-        validateTextDocument(doc);
-    }
+  settingsCache.clear();
+  getDefaultConfigLoader().clearCachedSettingsFiles();
+  for (const doc of documents.all()) {
+    validateTextDocument(doc);
+  }
 }
 
 const settingsCache: Map<string, CSpellSettings> = new Map();
@@ -171,12 +194,14 @@ export async function getSettingsForDocument(textDocument: TextDocument) {
   if (cached) {
     return cached;
   }
-  const docPath = textDocument.uri.startsWith('file:') ? fileURLToPath(textDocument.uri) : undefined;
+  const docPath = textDocument.uri.startsWith('file:')
+    ? fileURLToPath(textDocument.uri)
+    : undefined;
   let config;
   if (options.config) {
     try {
       config = await readSettings(options.config);
-    } catch (e) {
+    } catch {
       // The config file might not exist.
       config = undefined;
     }
@@ -185,21 +210,30 @@ export async function getSettingsForDocument(textDocument: TextDocument) {
     config = docPath ? await configLoader.searchForConfig(docPath) : undefined;
   }
 
-  const settings = mergeSettings(await getDefaultSettings(), await getGlobalSettingsAsync(), defaultSettings, config || {});
-  const documentSettings = constructSettingsForText(settings, undefined, textDocument.languageId);
+  const settings = mergeSettings(
+    await getDefaultSettings(),
+    await getGlobalSettingsAsync(),
+    defaultSettings,
+    config || {},
+  );
+  const documentSettings = constructSettingsForText(
+    settings,
+    undefined,
+    textDocument.languageId,
+  );
 
   // Add new custom dictionaries to watchers
-  documentSettings
-    .dictionaryDefinitions
-    ?.filter((dict) => dict.path !== undefined)
-    .filter((dict) => !!dict.addWords)
-    .filter((dict) => !watchingCustomDictionaries.has(dict.path))
-    .forEach((dict) => {
-      const baseUri = 'file://' + path.dirname(dict.path);
-      const pattern = path.basename(dict.path);
-      connection.client.register(DidChangeWatchedFilesNotification.type, { watchers: [{ globPattern: { baseUri, pattern } }] });
-      watchingCustomDictionaries.add(dict.path);
+  for (const dict of documentSettings.dictionaryDefinitions ?? []) {
+    if (!('path' in dict) || !dict.path) continue;
+    if (!('addWords' in dict) || !dict.addWords) continue;
+    if (watchingCustomDictionaries.has(dict.path)) continue;
+    const baseUri = 'file://' + path.dirname(dict.path);
+    const pattern = path.basename(dict.path);
+    connection.client.register(DidChangeWatchedFilesNotification.type, {
+      watchers: [{ globPattern: { baseUri, pattern } }],
     });
+    watchingCustomDictionaries.add(dict.path);
+  }
 
   settingsCache.set(textDocument.uri, documentSettings);
   return documentSettings;
@@ -222,49 +256,62 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     return { error: 'Could not extract the word from the message.' };
   }
 
-  if (command == "AddToUserWordsConfig" || command == "AddToWorkspaceWordsConfig") {
+  if (
+    command == 'AddToUserWordsConfig' ||
+    command == 'AddToWorkspaceWordsConfig'
+  ) {
     const docPath = fileURLToPath(uri);
     let configPath: string | undefined = options.config;
     if (!configPath) {
-        const config = await getDefaultConfigLoader().searchForConfig(docPath);
-        configPath = config?.source?.filename;
+      const config = await getDefaultConfigLoader().searchForConfig(docPath);
+      configPath = config?.source?.filename;
     }
 
     let currentSettings: CSpellUserSettings = {};
 
     if (configPath) {
-        try {
-            currentSettings = parseJsonc(fs.readFileSync(configPath, 'utf-8')) as CSpellUserSettings;
-        } catch (e) {
-            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-                return { error: `Could not parse ${configPath}: ${(e as Error).message}` };
-            }
+      try {
+        currentSettings = parseJsonc(
+          fs.readFileSync(configPath, 'utf-8'),
+        ) as CSpellUserSettings;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return {
+            error: `Could not parse ${configPath}: ${(e as Error).message}`,
+          };
         }
+      }
     } else {
-        if (!workspaceRoot) {
-            return { error: 'Cannot determine workspace root to create a new cspell.json file.' };
-        }
-        configPath = path.join(workspaceRoot, 'cspell.json');
-        currentSettings = defaultSettings;
+      if (!workspaceRoot) {
+        return {
+          error:
+            'Cannot determine workspace root to create a new cspell.json file.',
+        };
+      }
+      configPath = path.join(workspaceRoot, 'cspell.json');
+      currentSettings = defaultSettings;
     }
 
-
-    if (!configPath.endsWith(".json")) {
+    if (!configPath.endsWith('.json')) {
       return { error: `Only JSON config files are supported` };
     }
 
-    const attribute = command == "AddToUserWordsConfig" ? "userWords" : "words"
+    const attribute = command == 'AddToUserWordsConfig' ? 'userWords' : 'words';
     // Add the word to the user words array
     const words = currentSettings[attribute] || [];
     if (!words.includes(word)) {
-        words.push(word);
+      words.push(word);
     }
     currentSettings[attribute] = words;
 
     // Sort words before write if settings in enabled
-    if(options.sortWords) {
-      currentSettings.userWords?.sort((a, b) => a.localeCompare(b, 'en', {'sensitivity': 'base'}))
-      currentSettings.words?.sort((a, b) => a.localeCompare(b, 'en', {'sensitivity': 'base'}))
+    if (options.sortWords) {
+      currentSettings.userWords?.sort((a, b) =>
+        a.localeCompare(b, 'en', { sensitivity: 'base' }),
+      );
+      currentSettings.words?.sort((a, b) =>
+        a.localeCompare(b, 'en', { sensitivity: 'base' }),
+      );
     }
 
     // Write to file
@@ -273,7 +320,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     revalidateAllOpenDocuments();
     return { result: `Added "${word}" to the dictionary.` };
   }
-  if (command == "AddToCustomDictionary") {
+  if (command == 'AddToCustomDictionary') {
     // Assumes the file breaks lines with LF and it ends with a \n already,
     // instead of trying to be clever
     fs.appendFileSync(dictPath, `${word}\n`);
