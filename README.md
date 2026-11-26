@@ -92,6 +92,4 @@ The [Oxc extension for Zed](https://zed.dev/extensions/oxc) uses the project-loc
 
 ## License
 
-This is a fork of [vlabo/cspell-lsp](https://github.com/vlabo/cspell-lsp) based on upstream commit `c7b9a67`, which in turn derives from [cspell](https://github.com/streetsidesoftware/cspell) and [vscode-spell-checker](https://github.com/streetsidesoftware/vscode-spell-checker).
-
 Licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`). See [LICENSE](./LICENSE) for the full license text and [NOTICE](./NOTICE) for copyright attributions and the modification notice.
