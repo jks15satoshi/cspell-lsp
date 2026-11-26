@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 80,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "sortPackageJson": false,
+  "endOfLine": "lf",
+  "ignorePatterns": [
+    "bun.lock",
+    "package-lock.json",
+    "dist/**",
+    "node_modules/**"
+  ],
+  "overrides": [
+    {
+      "files": [".markdownlint-cli2.jsonc"],
+      "options": {
+        "trailingComma": "none"
+      }
+    }
+  ]
+}
