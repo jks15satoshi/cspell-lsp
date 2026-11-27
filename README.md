@@ -68,6 +68,8 @@ By default, the server resolves the CSpell engine for each workspace folder in t
 
 Local versions must be 8 or newer and expose the API used by the server. The server falls back to the bundled engine when packages are missing, versions are older than 8, imports fail, or the required API is unavailable. The startup log includes the reason for a fallback.
 
+Package directories are resolved with Node's ESM import conditions, in declaration order. A `require`-only entry is not selected by that resolution; pass the entry file to `--engine` when it is the only supported entry point.
+
 An invalid path passed to `--engine` is treated as a configuration error. The server stops with a clear message instead of silently falling back to the bundled engine.
 
 The server logs the selected mode, version, and package path once per workspace folder at info level. In a multi-root workspace, each folder can use a different local version.
@@ -94,7 +96,7 @@ bun run build
 bun run start
 ```
 
-The build writes the bundled server to `dist/cspell-lsp.js`; `bun run start` runs it with Node.
+The build writes the bundled server to `dist/cspell-lsp.js`; `bun run start` runs it with Node. The build resolves `cspell-lib` through module resolution, so dependencies hoisted to an ancestor `node_modules` (for example, in a monorepo) are supported.
 
 ### Testing and checks
 
