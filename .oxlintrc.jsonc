@@ -4,7 +4,7 @@
   "jsPlugins": ["eslint-plugin-tsdoc"],
   "categories": {
     "correctness": "error",
-    "suspicious": "warn"
+    "suspicious": "warn",
   },
   "rules": {
     "jsdoc/check-property-names": "off",
@@ -23,11 +23,11 @@
     "jsdoc/require-yields": "off",
     "no-var": "error",
     "tsdoc/syntax": "error",
-    "typescript/no-explicit-any": "warn"
+    "typescript/no-explicit-any": "warn",
   },
   "env": {
     "node": true,
-    "builtin": true
+    "builtin": true,
   },
-  "ignorePatterns": ["dist/**", "node_modules/**", "build/**"]
+  "ignorePatterns": ["dist/**", "node_modules/**", "build/**"],
 }

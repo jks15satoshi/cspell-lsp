@@ -10,8 +10,8 @@ on:
       - 'package.json'
       - 'bun.lock'
       - 'tsconfig.json'
-      - '.oxlintrc.json'
-      - '.oxfmtrc.json'
+      - '.oxlintrc.jsonc'
+      - '.oxfmtrc.jsonc'
       - '.gitattributes'
       - '.github/workflows/tests.yml'
   pull_request:
@@ -22,8 +22,8 @@ on:
       - 'package.json'
       - 'bun.lock'
       - 'tsconfig.json'
-      - '.oxlintrc.json'
-      - '.oxfmtrc.json'
+      - '.oxlintrc.jsonc'
+      - '.oxfmtrc.jsonc'
       - '.gitattributes'
       - '.github/workflows/tests.yml'
   workflow_dispatch:
