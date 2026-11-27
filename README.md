@@ -8,6 +8,7 @@ A language server that spell-checks source code with [CSpell](https://cspell.org
 - **Quick-fix code actions:** Offers case-matched CSpell suggestions for flagged words and marks preferred suggestions when available.
 - **Word-management commands:** Provides code actions and workspace commands to add words to `userWords` or `words` in the resolved configuration, or to a writable custom dictionary.
 - **Automatic revalidation:** Rechecks all open documents when a watched configuration file or custom dictionary changes, and after adding a word.
+- **`ignorePaths` support:** Skips files matched by `ignorePaths` from the merged configuration and clears diagnostics when an open file becomes ignored.
 - **Multi-root workspace support:** Resolves settings per document and supports using a different local CSpell engine in each workspace folder.
 
 ## Getting started
@@ -39,6 +40,8 @@ Configuration sources are merged in this order, with later sources taking preced
 2. global CSpell configuration
 3. `initializationOptions.defaultSettings`
 4. project configuration or the file passed with `--config`
+
+Files matching `ignorePaths` are not checked. Patterns from a configuration file are resolved relative to that file's `globRoot` or directory, including patterns declared by imported configurations.
 
 The global configuration is read from `cspell.json` in:
 

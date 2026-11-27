@@ -31,11 +31,25 @@ export interface SpellingDiagnostic extends Diagnostic {
   data: SpellCheckerDiagnosticData;
 }
 
+/**
+ * Validates a document against merged CSpell settings.
+ *
+ * @param textDocument - The document to validate.
+ * @param settings - Merged settings for the document.
+ * @param cSpell - CSpell engine used for validation.
+ * @param globRoot - Fallback root for ignore globs that do not define their own.
+ * @returns Diagnostics for the document, or an empty list when it is ignored.
+ */
 export async function validateTextDocument(
   textDocument: TextDocument,
   settings: CSpellUserSettings,
   cSpell: CSpellLib,
+  globRoot?: string,
 ): Promise<Diagnostic[]> {
+  if (isDocumentIgnored(textDocument.uri, settings, cSpell, globRoot)) {
+    return [];
+  }
+
   // const { severity, severityFlaggedWords } = calcSeverity(textDocument.uri, options);
   const defaultSeverity = DiagnosticSeverity.Information;
   const defaultSeverityFlaggedWords = DiagnosticSeverity.Information;
@@ -54,7 +68,7 @@ export async function validateTextDocument(
     settings,
   );
   await docVal.prepare();
-  const r = await docVal.checkDocumentAsync(true);
+  const r = await docVal.checkDocumentAsync();
   const diags = r
     // Convert the offset into a position
     .map((issue) => ({
@@ -107,6 +121,38 @@ export async function validateTextDocument(
     )
     .filter((diag) => !!diag.severity);
   return diags;
+}
+
+/**
+ * Checks the merged `ignorePaths` against the document URI.
+ *
+ * cspell-lib only applies `ignorePaths` from a configuration file it loads
+ * itself. This server passes fully merged settings with `noConfigSearch`, so
+ * defaults, the global configuration, and `--config` must be checked here.
+ * Configuration globs already carry the root of the file that defined them;
+ * `fallbackRoot` only applies to globs without a root, such as
+ * `initializationOptions.defaultSettings`.
+ */
+function isDocumentIgnored(
+  uri: string,
+  settings: CSpellUserSettings,
+  cSpell: CSpellLib,
+  fallbackRoot: string | undefined,
+): boolean {
+  const ignorePaths = settings.ignorePaths;
+  if (!ignorePaths?.length) return false;
+  // The helper treats schemes outside this set as excluded, even when no glob
+  // matches. Allow the document's own scheme so virtual documents are only
+  // ignored when their path actually matches a configured pattern.
+  const allowedSchemes = new Set(['file', 'untitled']);
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri)?.[1]?.toLowerCase();
+  if (scheme) allowedSchemes.add(scheme);
+  const isExcluded = cSpell.ExclusionHelper.generateExclusionFunctionForUri(
+    ignorePaths,
+    settings.globRoot ?? fallbackRoot ?? process.cwd(),
+    allowedSchemes,
+  );
+  return isExcluded(uri);
 }
 
 function haveSuggestionsMatchCase(

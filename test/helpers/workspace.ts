@@ -27,6 +27,11 @@ const fakeExports: Record<string, string> = {
   createTextDocument: `export function createTextDocument(info) {
   return { ...info };
 }`,
+  ExclusionHelper: `export const ExclusionHelper = {
+  generateExclusionFunctionForUri() {
+    return () => false;
+  },
+};`,
   getDictionary: `export async function getDictionary() {
   return { suggest() { return []; } };
 }`,

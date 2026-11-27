@@ -58,6 +58,7 @@ const REQUIRED_EXPORTS = [
   'createTextDocument',
   'constructSettingsForText',
   'DocumentValidator',
+  'ExclusionHelper',
   'getDefaultConfigLoader',
   'getDefaultSettings',
   'getDictionary',
@@ -186,6 +187,25 @@ export class EngineRegistry {
   }
 
   rootForDocument(uri: string): string | undefined {
+    return this.resolveDocumentUri(uri, false);
+  }
+
+  /**
+   * Returns the workspace path alias that matches the document URI.
+   *
+   * `rootForDocument` returns the logical root for engine selection. Rootless
+   * ignore globs must instead use the alias the URI is addressed by, so a
+   * workspace opened through a symlink still matches both its link and real
+   * paths.
+   */
+  rootAliasForDocument(uri: string): string | undefined {
+    return this.resolveDocumentUri(uri, true);
+  }
+
+  private resolveDocumentUri(
+    uri: string,
+    useAlias: boolean,
+  ): string | undefined {
     if (!uri.startsWith('file:')) return undefined;
     let filePath: string;
     try {
@@ -193,7 +213,7 @@ export class EngineRegistry {
     } catch {
       return undefined;
     }
-    return this.findOwningRoot(filePath);
+    return this.findOwningRoot(filePath, useAlias);
   }
 
   private findRootEntry(rootPath: string): RootEntry | undefined {
@@ -203,9 +223,12 @@ export class EngineRegistry {
     );
   }
 
-  private findOwningRoot(filePath: string): string | undefined {
+  private findOwningRoot(
+    filePath: string,
+    useAlias: boolean,
+  ): string | undefined {
     const absolute = path.resolve(filePath);
-    const direct = this.matchRoot(absolute);
+    const direct = this.matchRoot(absolute, useAlias);
     if (direct) return direct;
 
     // A client can address a real workspace through a symlinked path. Fall
@@ -213,10 +236,20 @@ export class EngineRegistry {
     // did not match a root, so symlinked subdirectories keep their URI root.
     const realParent = this.getRealParent(path.dirname(absolute));
     if (!realParent) return undefined;
-    return this.matchRoot(path.join(realParent, path.basename(absolute)));
+    const realPath = path.join(realParent, path.basename(absolute));
+    const matched = this.matchRoot(realPath, useAlias);
+    if (!matched || !useAlias) return matched;
+
+    // Keep the alias prefix from the document URI. The real parent only shows
+    // that both paths address the same workspace; rootless ignore globs still
+    // have to be anchored where the client opened the document.
+    const suffix = path.sep + path.relative(matched, realPath);
+    return absolute.endsWith(suffix)
+      ? absolute.slice(0, -suffix.length)
+      : matched;
   }
 
-  private matchRoot(filePath: string): string | undefined {
+  private matchRoot(filePath: string, useAlias: boolean): string | undefined {
     let best: { root: string; length: number } | undefined;
     for (const entry of this.rootEntries) {
       for (const alias of entry.aliases) {
@@ -224,7 +257,10 @@ export class EngineRegistry {
           isPathInside(filePath, alias) &&
           (!best || alias.length > best.length)
         ) {
-          best = { root: entry.logical, length: alias.length };
+          best = {
+            root: useAlias ? alias : entry.logical,
+            length: alias.length,
+          };
         }
       }
     }

@@ -8,9 +8,11 @@ import {
 } from 'bun:test';
 import {
   appendFileSync,
+  mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,8 +21,10 @@ import { pathToFileURL } from 'node:url';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
-import type { CSpellEngine } from '../src/engine.js';
+import type { CSpellSettings } from 'cspell-lib';
+import type { CSpellEngine, CSpellLib } from '../src/engine.js';
 import { EngineRegistry } from '../src/engine.js';
+import type { SettingsResolverOptions } from '../src/settings.js';
 import { SettingsResolver } from '../src/settings.js';
 import { validateTextDocument } from '../src/validator.js';
 import {
@@ -34,6 +38,8 @@ const unknownWord = `zz${Math.random()
   .replace(/[^a-z]/g, '')
   .padEnd(8, 'x')
   .slice(0, 8)}`;
+
+const unknownWordDiagnostic = `"${unknownWord}": Unknown word.`;
 
 const isolatedEnvNames = [
   'XDG_CONFIG_HOME',
@@ -72,42 +78,50 @@ afterAll(() => {
 
 afterEach(cleanupTempDirs);
 
-function createEngine(): CSpellEngine {
+function createEngine(lib: CSpellLib = cspellLib): CSpellEngine {
   return {
     mode: 'bundled',
     version: 'test',
     packagePath: '<bundled>',
-    lib: cspellLib,
+    lib,
   };
 }
 
-function createResolver(): SettingsResolver {
-  const engine = createEngine();
+function createResolver(
+  options: SettingsResolverOptions = {},
+  lib: CSpellLib = cspellLib,
+): SettingsResolver {
+  const engine = createEngine(lib);
   const registry = {
     getForDocument: () => engine,
     all: () => [engine],
   } as unknown as EngineRegistry;
-  return new SettingsResolver(registry);
+  return new SettingsResolver(registry, options);
 }
 
-function createDocument(root: string): TextDocument {
+function createDocument(root: string, file = 'fixture.md'): TextDocument {
   return TextDocument.create(
-    pathToFileURL(path.join(root, 'fixture.md')).href,
+    pathToFileURL(path.join(root, file)).href,
     'markdown',
     1,
     `This is a ${unknownWord} word.`,
   );
 }
 
-function writeConfig(root: string, settings: object): void {
+function writeSettings(file: string, settings: object): void {
+  mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(
-    path.join(root, 'cspell.json'),
+    file,
     JSON.stringify(
       { version: '0.2', language: 'en', enabled: true, ...settings },
       null,
       2,
     ),
   );
+}
+
+function writeConfig(root: string, settings: object): void {
+  writeSettings(path.join(root, 'cspell.json'), settings);
 }
 
 describe('SettingsResolver with real cspell-lib', () => {
@@ -130,6 +144,256 @@ describe('SettingsResolver with real cspell-lib', () => {
 
     expect(
       await validateTextDocument(document, after.settings, cspellLib),
+    ).toEqual([]);
+  });
+
+  test('ignores documents matched by workspace ignorePaths and follows changes', async () => {
+    const root = createTempDir();
+    writeConfig(root, { ignorePaths: ['dist/**'] });
+    const resolver = createResolver();
+    const ignoredDocument = createDocument(root, 'dist/fixture.md');
+
+    const ignored = await resolver.getForDocument(ignoredDocument);
+    expect(
+      await validateTextDocument(
+        ignoredDocument,
+        ignored.settings,
+        cspellLib,
+        root,
+      ),
+    ).toEqual([]);
+
+    const checkedDocument = createDocument(root);
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(
+          checkedDocument,
+          checked.settings,
+          cspellLib,
+          root,
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+
+    writeConfig(root, {});
+    resolver.clear();
+    const unignored = await resolver.getForDocument(ignoredDocument);
+    expect(
+      (
+        await validateTextDocument(
+          ignoredDocument,
+          unignored.settings,
+          cspellLib,
+          root,
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+
+    writeConfig(root, { ignorePaths: ['dist/**'] });
+    resolver.clear();
+    const ignoredAgain = await resolver.getForDocument(ignoredDocument);
+    expect(
+      await validateTextDocument(
+        ignoredDocument,
+        ignoredAgain.settings,
+        cspellLib,
+        root,
+      ),
+    ).toEqual([]);
+  });
+
+  test('uses ignorePaths from defaultSettings', async () => {
+    const root = createTempDir();
+    writeConfig(root, {});
+    const resolver = createResolver({
+      defaultSettings: { ignorePaths: ['build/**'] },
+    });
+    const ignoredDocument = createDocument(root, 'build/fixture.md');
+
+    const ignored = await resolver.getForDocument(ignoredDocument);
+    expect(
+      await validateTextDocument(
+        ignoredDocument,
+        ignored.settings,
+        cspellLib,
+        root,
+      ),
+    ).toEqual([]);
+
+    const checkedDocument = createDocument(root);
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(
+          checkedDocument,
+          checked.settings,
+          cspellLib,
+          root,
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
+  test('does not ignore virtual documents without a matching ignore pattern', async () => {
+    const root = createTempDir();
+    writeConfig(root, {});
+    const resolver = createResolver();
+    const document = TextDocument.create(
+      'git:/workspace/src/fixture.md',
+      'markdown',
+      1,
+      `This is a ${unknownWord} word.`,
+    );
+
+    const { settings } = await resolver.getForDocument(document);
+    expect(
+      (await validateTextDocument(document, settings, cspellLib, root)).map(
+        (diagnostic) => diagnostic.message,
+      ),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
+  test('anchors defaultSettings ignorePaths to the document symlink alias', async () => {
+    const realRoot = createTempDir();
+    writeConfig(realRoot, {});
+    mkdirSync(path.join(realRoot, 'dist'), { recursive: true });
+    const linkRoot = path.join(createTempDir(), 'workspace');
+    symlinkSync(
+      realRoot,
+      linkRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    for (const roots of [[linkRoot], [realRoot]]) {
+      const registry = await EngineRegistry.create({
+        roots,
+        engineOverride: 'bundled',
+      });
+      const resolver = new SettingsResolver(registry, {
+        defaultSettings: { ignorePaths: ['dist/**'] },
+      });
+
+      for (const root of [linkRoot, realRoot]) {
+        const document = createDocument(root, 'dist/fixture.md');
+        const { engine, settings } = await resolver.getForDocument(document);
+        expect(
+          await validateTextDocument(
+            document,
+            settings,
+            engine.lib,
+            registry.rootAliasForDocument(document.uri),
+          ),
+        ).toEqual([]);
+      }
+    }
+  });
+
+  test('uses ignorePaths from an explicit config relative to its globRoot', async () => {
+    const root = createTempDir();
+    const configFile = path.join(root, 'configs', 'custom.json');
+    writeSettings(configFile, {
+      globRoot: '../src',
+      ignorePaths: ['generated/**'],
+    });
+    const resolver = createResolver({ configPath: configFile });
+    const ignoredDocument = createDocument(root, 'src/generated/fixture.md');
+
+    const ignored = await resolver.getForDocument(ignoredDocument);
+    expect(
+      await validateTextDocument(
+        ignoredDocument,
+        ignored.settings,
+        cspellLib,
+        root,
+      ),
+    ).toEqual([]);
+
+    const checkedDocument = createDocument(root, 'src/fixture.md');
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(
+          checkedDocument,
+          checked.settings,
+          cspellLib,
+          root,
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
+  test('resolves ignorePaths relative to each imported configuration', async () => {
+    const root = createTempDir();
+    writeSettings(path.join(root, 'config', 'shared.json'), {
+      ignorePaths: ['vendor/**'],
+    });
+    writeConfig(root, { import: ['./config/shared.json'] });
+    const resolver = createResolver();
+
+    const ignoredDocument = createDocument(root, 'config/vendor/fixture.md');
+    const ignored = await resolver.getForDocument(ignoredDocument);
+    expect(
+      await validateTextDocument(
+        ignoredDocument,
+        ignored.settings,
+        cspellLib,
+        root,
+      ),
+    ).toEqual([]);
+
+    const checkedDocument = createDocument(root, 'vendor/fixture.md');
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(
+          checkedDocument,
+          checked.settings,
+          cspellLib,
+          root,
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
+  test('uses ignorePaths from the global configuration', async () => {
+    const root = createTempDir();
+    const globalRoot = createTempDir();
+    writeConfig(root, {});
+    const globalSettings: CSpellSettings = {
+      ignorePaths: [{ glob: '**/global-ignored/**', root: globalRoot }],
+    };
+    const lib = {
+      ...cspellLib,
+      async getGlobalSettingsAsync() {
+        return globalSettings;
+      },
+    } as CSpellLib;
+    const resolver = createResolver({}, lib);
+
+    const ignoredDocument = createDocument(root, 'global-ignored/fixture.md');
+    const ignored = await resolver.getForDocument(ignoredDocument);
+    expect(
+      await validateTextDocument(ignoredDocument, ignored.settings, lib, root),
+    ).toEqual([]);
+
+    const checkedDocument = createDocument(root);
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(checkedDocument, checked.settings, lib, root)
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
+  test('does not check disabled documents', async () => {
+    const root = createTempDir();
+    writeConfig(root, { enabled: false });
+    const resolver = createResolver();
+    const document = createDocument(root);
+
+    const { settings } = await resolver.getForDocument(document);
+    expect(
+      await validateTextDocument(document, settings, cspellLib, root),
     ).toEqual([]);
   });
 
