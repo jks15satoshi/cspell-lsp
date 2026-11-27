@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 const temporaryDirectories: string[] = [];
 
 const fakeExports: Record<string, string> = {
+  defaultConfigFilenames: `export const defaultConfigFilenames = ['cspell.json'];`,
   DocumentValidator: `export class DocumentValidator {
   constructor(doc, options, settings) {
     this.doc = doc;

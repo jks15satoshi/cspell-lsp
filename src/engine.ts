@@ -57,6 +57,7 @@ const MINIMUM_MAJOR_VERSION = 8;
 const REQUIRED_EXPORTS = [
   'createTextDocument',
   'constructSettingsForText',
+  'defaultConfigFilenames',
   'DocumentValidator',
   'ExclusionHelper',
   'getDefaultConfigLoader',
@@ -548,6 +549,9 @@ function normalizeEngineModule(module: unknown): {
 function findMissingExports(namespace: Record<string, unknown>): string[] {
   return REQUIRED_EXPORTS.filter((name) => {
     const value = namespace[name];
+    if (name === 'defaultConfigFilenames') {
+      return !Array.isArray(value) || value.length === 0;
+    }
     return (
       typeof value !== 'function' &&
       (typeof value !== 'object' || value === null)

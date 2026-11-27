@@ -334,6 +334,20 @@ describe('EngineRegistry auto mode', () => {
     expect(engine.fallbackReason).toContain('getDictionary');
   });
 
+  test('falls back when default config file names are missing', async () => {
+    const root = createTempDir();
+    writeFakeCSpellLib(path.join(root, 'node_modules', 'cspell-lib'), {
+      version: '9.0.0',
+      missingExports: ['defaultConfigFilenames'],
+    });
+
+    const { registry } = await createRegistry([root]);
+    const engine = registry.getForDocument(documentUri(root));
+
+    expect(engine.packagePath).toBe('<bundled>');
+    expect(engine.fallbackReason).toContain('defaultConfigFilenames');
+  });
+
   test('logs a selection once and not for every document', async () => {
     const root = createTempDir();
     writeFakeCSpellLib(path.join(root, 'node_modules', 'cspell-lib'), {

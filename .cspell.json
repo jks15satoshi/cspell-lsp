@@ -4,5 +4,17 @@
   "language": "en",
   "useGitignore": true,
   "dictionaries": ["en_us", "en-gb"],
-  "words": ["lockfiles", "monorepo", "vlabo"]
+  "words": [
+    "cjs",
+    "cts",
+    "editability",
+    "jsonc",
+    "lockfiles",
+    "mjs",
+    "monorepo",
+    "mts",
+    "toml",
+    "vlabo",
+    "writability"
+  ]
 }
