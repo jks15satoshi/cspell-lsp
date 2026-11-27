@@ -17,7 +17,6 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { parse as parseJsonc, stringify as stringifyJsonc } from 'comment-json';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import type { CSpellUserSettings } from 'cspell-lib';
@@ -27,9 +26,14 @@ import {
   createOnCodeActionHandler,
   type CodeActionDocumentContext,
 } from './codeActions.js';
+import {
+  ConfigEditError,
+  ConfigEditor,
+  configWatcherPatterns,
+  getConfigFileNames,
+} from './config.js';
 import { EngineRegistry } from './engine.js';
 import { SettingsResolver } from './settings.js';
-import { cloneSettingsForConfig } from './configWords.js';
 import commandLineArgs from 'command-line-args';
 
 const optionDefinitions = [
@@ -64,6 +68,7 @@ const watchingCustomDictionaries: Set<string> = new Set();
 
 let engineRegistryPromise: Promise<EngineRegistry> | undefined;
 let settingsResolver: SettingsResolver | undefined;
+let configEditor: ConfigEditor | undefined;
 
 connection.onInitialize((params: InitializeParams) => {
   defaultSettings = params.initializationOptions?.defaultSettings ?? {};
@@ -148,7 +153,12 @@ connection.onDidChangeWatchedFiles(async (change) => {
 });
 
 connection.onCodeAction(
-  createOnCodeActionHandler(documents, getDocumentContext),
+  createOnCodeActionHandler(
+    documents,
+    getDocumentContext,
+    async (textDocument) =>
+      (await ensureConfigEditor()).canEdit(textDocument.uri),
+  ),
 );
 
 // This event is emitted when the text document first opened or when its content has changed.
@@ -213,6 +223,24 @@ async function ensureSettingsResolver(): Promise<SettingsResolver> {
   return settingsResolver;
 }
 
+async function ensureConfigEditor(): Promise<ConfigEditor> {
+  if (!configEditor) {
+    const registry = await getEngineRegistry();
+    configEditor = new ConfigEditor(
+      {
+        engineForDocument: (uri) => registry.getForDocument(uri),
+        workspaceRootForDocument: (uri) =>
+          registry.rootForDocument(uri) ?? registry.roots[0],
+      },
+      {
+        configPath: options.config,
+        defaultSettings,
+      },
+    );
+  }
+  return configEditor;
+}
+
 function createSettingsResolver(registry: EngineRegistry): SettingsResolver {
   return new SettingsResolver(registry, {
     configPath: options.config,
@@ -222,25 +250,6 @@ function createSettingsResolver(registry: EngineRegistry): SettingsResolver {
 }
 
 async function registerWatchers(registry: EngineRegistry): Promise<void> {
-  const watchers: FileSystemWatcher[] = [
-    { globPattern: '**/cspell.{json,yaml,yml}' },
-    { globPattern: '**/.cspell.json' },
-  ];
-  if (options.config) {
-    let baseUri: string;
-    let pattern: string;
-    if (path.isAbsolute(options.config)) {
-      baseUri = pathToFileURL(path.dirname(options.config)).href;
-      pattern = path.basename(options.config);
-    } else {
-      baseUri = pathToFileURL(process.cwd()).href;
-      pattern = options.config.startsWith('.' + path.sep)
-        ? options.config.substring(2)
-        : options.config;
-    }
-    watchers.push({ globPattern: { baseUri, pattern } });
-  }
-
   const globalRoots = new Set<string>();
   for (const engine of registry.all()) {
     try {
@@ -253,12 +262,23 @@ async function registerWatchers(registry: EngineRegistry): Promise<void> {
       );
     }
   }
-  for (const globRoot of globalRoots) {
-    if (!fs.existsSync(globRoot)) continue;
-    const baseUri = pathToFileURL(globRoot).href;
-    // https://github.com/streetsidesoftware/cspell/blob/1bee5f5aa4429a1b1ae0e88934b093c5440b44dc/packages/cspell-lib/src/lib/Settings/cfgStore.ts#L15
-    watchers.push({ globPattern: { baseUri, pattern: 'cspell.json' } });
-  }
+
+  const roots = registry.roots.map((root) => ({
+    root,
+    fileNames: getConfigFileNames(registry.getForRoot(root)),
+  }));
+  const patterns = configWatcherPatterns({
+    roots,
+    fallbackFileNames:
+      roots.length === 0
+        ? getConfigFileNames(registry.getForDocument(''))
+        : undefined,
+    configPath: options.config,
+    globalConfigRoots: [...globalRoots],
+  });
+  const watchers: FileSystemWatcher[] = patterns.map(({ baseUri, pattern }) =>
+    baseUri ? { globPattern: { baseUri, pattern } } : { globPattern: pattern },
+  );
 
   // Watch for changes in cspell config files
   try {
@@ -314,74 +334,21 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     return { error: 'Could not extract the word from the message.' };
   }
 
-  const registry = await getEngineRegistry();
-  const engine = registry.getForDocument(uri);
-
   if (
     command == 'AddToUserWordsConfig' ||
     command == 'AddToWorkspaceWordsConfig'
   ) {
-    const docPath = fileURLToPath(uri);
-    let configPath: string | undefined = options.config;
-    if (!configPath) {
-      const config = await engine.lib
-        .getDefaultConfigLoader()
-        .searchForConfig(docPath);
-      configPath = config?.source?.filename;
-    }
-
-    let currentSettings: CSpellUserSettings = {};
-
-    if (configPath) {
-      try {
-        currentSettings = parseJsonc(
-          fs.readFileSync(configPath, 'utf-8'),
-        ) as CSpellUserSettings;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-          return {
-            error: `Could not parse ${configPath}: ${(e as Error).message}`,
-          };
-        }
-      }
-    } else {
-      const workspaceRoot = registry.rootForDocument(uri) ?? registry.roots[0];
-      if (!workspaceRoot) {
-        return {
-          error:
-            'Cannot determine workspace root to create a new cspell.json file.',
-        };
-      }
-      configPath = path.join(workspaceRoot, 'cspell.json');
-      // `defaultSettings` is shared by every workspace folder. Clone the
-      // arrays that adding and sorting mutate before writing a new config.
-      currentSettings = cloneSettingsForConfig(defaultSettings);
-    }
-
-    if (!configPath.endsWith('.json')) {
-      return { error: `Only JSON config files are supported` };
-    }
-
     const attribute = command == 'AddToUserWordsConfig' ? 'userWords' : 'words';
-    // Add the word to the user words array
-    const words = currentSettings[attribute] || [];
-    if (!words.includes(word)) {
-      words.push(word);
+    try {
+      await (
+        await ensureConfigEditor()
+      ).addWord(uri!, attribute, word, { sortWords: options.sortWords });
+    } catch (error) {
+      if (error instanceof ConfigEditError) {
+        return { error: error.message };
+      }
+      return { error: errorMessage(error) };
     }
-    currentSettings[attribute] = words;
-
-    // Sort words before write if settings in enabled
-    if (options.sortWords) {
-      currentSettings.userWords?.sort((a, b) =>
-        a.localeCompare(b, 'en', { sensitivity: 'base' }),
-      );
-      currentSettings.words?.sort((a, b) =>
-        a.localeCompare(b, 'en', { sensitivity: 'base' }),
-      );
-    }
-
-    // Write to file
-    fs.writeFileSync(configPath, stringifyJsonc(currentSettings, null, 2));
 
     await revalidateAllOpenDocuments();
     return { result: `Added "${word}" to the dictionary.` };
