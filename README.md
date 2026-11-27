@@ -124,8 +124,6 @@ bun run format:check
 bun run lint
 ```
 
-The [Oxc extension for Zed](https://zed.dev/extensions/oxc) uses the project-local `oxfmt` and `oxlint` binaries, so install the extension after `bun install`. `.oxfmtrc.json` disables trailing commas for `*.jsonc`; this keeps JSONC configuration files compatible with their JSON schemas while leaving `markdownlint-cli2`'s own parsing unchanged.
-
 ## About this fork
 
 The upstream [`vlabo/cspell-lsp`](https://github.com/vlabo/cspell-lsp) has been marked as deprecated in favor of [Codebook](https://github.com/blopker/codebook). In practice, however, I have found that Codebook is not yet a drop-in replacement for CSpell, whether in dictionary coverage or in functionality, so I believe this project still warrants continued maintenance.
