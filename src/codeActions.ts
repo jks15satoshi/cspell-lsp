@@ -1,9 +1,8 @@
 import type {
-  SpellingDictionary,
+  CSpellSettings,
   SuggestionResult,
   SuggestOptions,
 } from 'cspell-lib';
-import { CompoundWordsMethod, getDictionary, Text } from 'cspell-lib';
 import type {
   CodeActionParams,
   Range as LangServerRange,
@@ -20,9 +19,8 @@ import {
   TextEdit,
 } from 'vscode-languageserver-types';
 
+import type { CSpellEngine } from './engine.js';
 import * as Validator from './validator.js';
-
-import { getSettingsForDocument } from './main';
 
 function extractDiagnosticData(
   diag: Diagnostic,
@@ -78,20 +76,32 @@ function isWordLikeSelection(
   return !hasSpace;
 }
 
+export interface CodeActionDocumentContext {
+  engine: CSpellEngine;
+  settings: CSpellSettings;
+}
+
+export type DocumentContextProvider = (
+  doc: TextDocument,
+) => Promise<CodeActionDocumentContext>;
+
 export function createOnCodeActionHandler(
   documents: TextDocuments<TextDocument>,
+  getDocumentContext: DocumentContextProvider,
 ): (params: CodeActionParams) => Promise<CodeAction[]> {
-  const codeActionHandler = new CodeActionHandler(documents);
+  const codeActionHandler = new CodeActionHandler(
+    documents,
+    getDocumentContext,
+  );
 
   return (params) => codeActionHandler.handler(params);
 }
 
 class CodeActionHandler {
-  private sugGen: SuggestionGenerator;
-
-  constructor(readonly documents: TextDocuments<TextDocument>) {
-    this.sugGen = new SuggestionGenerator();
-  }
+  constructor(
+    readonly documents: TextDocuments<TextDocument>,
+    private readonly getDocumentContext: DocumentContextProvider,
+  ) {}
 
   public async handler(params: CodeActionParams): Promise<CodeAction[]> {
     const {
@@ -111,15 +121,20 @@ class CodeActionHandler {
       return [];
     }
 
+    const { engine, settings } = await this.getDocumentContext(textDocument);
     const ctx = {
       params,
       textDocument,
+      engine,
     };
 
-    const actions = await this.handlerCSpell({
-      ...ctx,
-      diags: spellCheckerDiags,
-    });
+    const actions = await this.handlerCSpell(
+      {
+        ...ctx,
+        diags: spellCheckerDiags,
+      },
+      settings,
+    );
     const arg = {
       uri: params.textDocument.uri,
       range: diagnostics[0].range,
@@ -147,7 +162,6 @@ class CodeActionHandler {
       },
     });
 
-    const settings = await getSettingsForDocument(ctx.textDocument);
     const dictionaries = settings.dictionaries ?? [];
     if (
       settings.dictionaryDefinitions &&
@@ -182,15 +196,23 @@ class CodeActionHandler {
     return actions;
   }
 
-  private async handlerCSpell(handlerContext: CodeActionHandlerContext) {
-    const { params, textDocument, diags: spellCheckerDiags } = handlerContext;
+  private async handlerCSpell(
+    handlerContext: CodeActionHandlerContext,
+    settings: CSpellSettings,
+  ) {
+    const {
+      params,
+      textDocument,
+      diags: spellCheckerDiags,
+      engine,
+    } = handlerContext;
     const actions: CodeAction[] = [];
     const uri = textDocument.uri;
     const cursorRange = params.range;
     if (!spellCheckerDiags.length) return [];
 
     const getSuggestions = (word: string) => {
-      return this.sugGen.genWordSuggestions(textDocument, word);
+      return this.genWordSuggestions(engine, settings, word);
     };
 
     // Find the specific diagnostic the user is pointing at.
@@ -198,65 +220,45 @@ class CodeActionHandler {
       isPositionInRange(cursorRange.start, diag.range),
     );
 
-    async function genCodeActionsForSuggestions(
-      _dictionary: SpellingDictionary,
-    ) {
-      let diagWord: string | undefined;
-      for (const diag of relevantDiagnostics) {
-        const { suggestions } = extractDiagnosticData(diag);
-        const srcWord = textDocument.getText(diag.range);
-        diagWord = diagWord || srcWord;
-        const sugs: Validator.Suggestion[] =
-          suggestions ?? (await getSuggestions(srcWord)) ?? [];
-        sugs
-          .map(({ word, isPreferred }) => ({
-            word: Text.isLowerCase(word) ? Text.matchCase(srcWord, word) : word,
-            isPreferred,
-          }))
-          .forEach((sug) => {
-            const sugWord = sug.word;
-            const title = suggestionToTitle(sug);
-            if (!title) return;
-            const workspaceEdit: WorkspaceEdit = {
-              changes: { [uri]: [replaceText(diag.range, sugWord)] },
-            };
+    for (const diag of relevantDiagnostics) {
+      const { suggestions } = extractDiagnosticData(diag);
+      const srcWord = textDocument.getText(diag.range);
+      const sugs: Validator.Suggestion[] =
+        suggestions ?? (await getSuggestions(srcWord)) ?? [];
+      sugs
+        .map(({ word, isPreferred }) => ({
+          word: engine.lib.Text.isLowerCase(word)
+            ? engine.lib.Text.matchCase(srcWord, word)
+            : word,
+          isPreferred,
+        }))
+        .forEach((sug) => {
+          const sugWord = sug.word;
+          const title = suggestionToTitle(sug);
+          if (!title) return;
+          const workspaceEdit: WorkspaceEdit = {
+            changes: { [uri]: [replaceText(diag.range, sugWord)] },
+          };
 
-            const action = createWorkspaceAction(
-              title,
-              workspaceEdit,
-              [diag],
-              sug.isPreferred,
-            );
-            actions.push(action);
-          });
-      }
-
-      return actions;
+          const action = createWorkspaceAction(
+            title,
+            workspaceEdit,
+            [diag],
+            sug.isPreferred,
+          );
+          actions.push(action);
+        });
     }
-    const dictionary = await getDictionary({});
 
-    return genCodeActionsForSuggestions(dictionary);
+    return actions;
   }
-}
 
-interface CodeActionHandlerContext {
-  params: CodeActionParams;
-  diags: Diagnostic[];
-  textDocument: TextDocument;
-}
-
-const wordLengthForLimitingSuggestions = 15;
-const maxNumberOfSuggestionsForLongWords = 1;
-const regexJoinedWords = /[+]/g;
-
-class SuggestionGenerator {
-  async genSuggestions(
-    doc: TextDocument,
+  private async genSuggestions(
+    engine: CSpellEngine,
+    settings: CSpellSettings,
     word: string,
   ): Promise<SuggestionResult[]> {
-    const settings = await getSettingsForDocument(doc);
-
-    const dictionary = await getDictionary(settings);
+    const dictionary = await engine.lib.getDictionary(settings);
     const numSuggestions = 5;
     if (word.length > 20) {
       return [];
@@ -269,7 +271,7 @@ class SuggestionGenerator {
       numChanges: 3,
       numSuggestions: numSugs,
       // Turn off compound suggestions for now until it works a bit better.
-      compoundMethod: CompoundWordsMethod.NONE,
+      compoundMethod: engine.lib.CompoundWordsMethod.NONE,
       ignoreCase: false,
       // Do not included ties, it could create a long list of suggestions.
       includeTies: false,
@@ -279,11 +281,12 @@ class SuggestionGenerator {
       .map((s) => ({ ...s, word: s.word.replace(regexJoinedWords, '') }));
   }
 
-  async genWordSuggestions(
-    doc: TextDocument,
+  private async genWordSuggestions(
+    engine: CSpellEngine,
+    settings: CSpellSettings,
     word: string,
   ): Promise<Validator.Suggestion[]> {
-    return (await this.genSuggestions(doc, word)).map(
+    return (await this.genSuggestions(engine, settings, word)).map(
       ({ word: suggestionWord, isPreferred }) => ({
         word: suggestionWord,
         isPreferred,
@@ -291,3 +294,14 @@ class SuggestionGenerator {
     );
   }
 }
+
+interface CodeActionHandlerContext {
+  params: CodeActionParams;
+  diags: Diagnostic[];
+  textDocument: TextDocument;
+  engine: CSpellEngine;
+}
+
+const wordLengthForLimitingSuggestions = 15;
+const maxNumberOfSuggestionsForLongWords = 1;
+const regexJoinedWords = /[+]/g;
