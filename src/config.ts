@@ -119,6 +119,13 @@ export interface ConfigWatcherOptions {
   configPath?: string | null;
   cwd?: string;
   globalConfigRoots?: readonly string[];
+  /**
+   * Whether the client supports LSP RelativePattern watchers.
+   *
+   * Defaults to true for callers that do not know the capability. When false,
+   * absolute string globs are emitted instead.
+   */
+  relativePatternSupport?: boolean;
 }
 
 export interface ConfigWatcherPattern {
@@ -127,27 +134,98 @@ export interface ConfigWatcherPattern {
 }
 
 /**
+ * Escapes glob metacharacters in a literal path segment.
+ *
+ * LSP watchers always interpret their pattern as a glob. A path segment that
+ * comes from the filesystem must therefore be escaped before it is combined
+ * with a relative pattern. Do not pass patterns from `configWatcherGlobs()`
+ * here: those intentionally contain glob syntax.
+ *
+ * Bracket expressions keep the characters literal for common LSP client glob
+ * implementations. Normalize platform separators before calling this helper.
+ */
+export function escapeGlobLiteral(value: string): string {
+  return value.replace(/[\\*?[\]{}]/g, (character) => {
+    switch (character) {
+      case '\\':
+        return '[\\\\]';
+      case '*':
+        return '[*]';
+      case '?':
+        return '[?]';
+      case '[':
+        return '[[]';
+      case ']':
+        return '[]]';
+      case '{':
+        return '[{]';
+      case '}':
+        return '[}]';
+      default:
+        return character;
+    }
+  });
+}
+
+/**
+ * Converts a watcher base URI and relative pattern into an absolute glob.
+ *
+ * LSP clients without `relativePatternSupport` cannot consume relative
+ * `baseUri` watchers, so the server sends the equivalent string glob instead.
+ * The base path is literal and is escaped before it is joined with `pattern`,
+ * which is expected to be a glob or an already escaped literal.
+ */
+export function absoluteWatcherPattern(
+  baseUri: string,
+  pattern: string,
+): string {
+  const basePath = fileURLToPath(baseUri);
+  // A POSIX path may contain a literal backslash. Only Windows uses `\` as
+  // its separator, so only Windows converts it to the LSP glob separator.
+  const normalized =
+    path.sep === '\\' ? basePath.replace(/\\/g, '/') : basePath;
+  const escaped = escapeGlobLiteral(normalized);
+  const trimmed = escaped.endsWith('/') ? escaped.slice(0, -1) : escaped;
+  return `${trimmed}/${pattern}`;
+}
+
+/**
  * Builds the complete watched-file pattern list.
  *
  * Project configs are scoped to each workspace root and use that root's
  * selected engine. The explicit `--config` and global config watchers are kept
  * independent of the engine's project config names.
+ *
+ * When `relativePatternSupport` is false, the same paths are emitted as
+ * absolute string globs.
  */
 export function configWatcherPatterns(
   options: ConfigWatcherOptions,
 ): ConfigWatcherPattern[] {
   const patterns: ConfigWatcherPattern[] = [];
+  const useRelativePatterns = options.relativePatternSupport !== false;
+
+  const addPattern = (baseUri: string | undefined, pattern: string): void => {
+    if (baseUri && !useRelativePatterns) {
+      patterns.push({ pattern: absoluteWatcherPattern(baseUri, pattern) });
+    } else if (baseUri) {
+      patterns.push({ baseUri, pattern });
+    } else {
+      patterns.push({ pattern });
+    }
+  };
 
   if (options.roots.length > 0) {
     for (const { root, fileNames } of options.roots) {
       const baseUri = pathToFileURL(root).href;
+      // These patterns intentionally contain glob syntax.
       for (const pattern of configWatcherGlobs(fileNames)) {
-        patterns.push({ baseUri, pattern });
+        addPattern(baseUri, pattern);
       }
     }
   } else if (options.fallbackFileNames) {
     for (const pattern of configWatcherGlobs(options.fallbackFileNames)) {
-      patterns.push({ pattern });
+      addPattern(undefined, pattern);
     }
   }
 
@@ -156,19 +234,17 @@ export function configWatcherPatterns(
       options.cwd ?? process.cwd(),
       options.configPath,
     );
-    patterns.push({
-      baseUri: pathToFileURL(path.dirname(absolute)).href,
-      pattern: path.basename(absolute),
-    });
+    // The explicit config name is a literal file name, not a glob pattern.
+    addPattern(
+      pathToFileURL(path.dirname(absolute)).href,
+      escapeGlobLiteral(path.basename(absolute)),
+    );
   }
 
   for (const root of options.globalConfigRoots ?? []) {
     if (!fs.existsSync(root)) continue;
     // Global config stays cspell.json; see cspell-lib's cfgStore.
-    patterns.push({
-      baseUri: pathToFileURL(root).href,
-      pattern: 'cspell.json',
-    });
+    addPattern(pathToFileURL(root).href, escapeGlobLiteral('cspell.json'));
   }
 
   const seen = new Set<string>();
@@ -382,6 +458,64 @@ export class ConfigEditor {
       );
     }
 
+    this.assertEditable(target);
+
+    const sortWords = options.sortWords ?? false;
+    return withConfigWriteLock(configWriteKey(target.path), async () => {
+      const engine = this.host.engineForDocument(documentUri);
+      const adapter = this.adapterFor(engine);
+      const current = await this.reloadTarget(adapter, target);
+      this.assertEditable(current);
+
+      if (current.kind === 'new') {
+        try {
+          addWordsToSettings(current.settings, attribute, word, sortWords);
+          fs.writeFileSync(
+            current.path,
+            stringifyJsonc(current.settings, null, 2),
+          );
+        } catch (error) {
+          throw new ConfigEditError(
+            `Could not write ${current.path}: ${errorMessage(error)}`,
+          );
+        }
+        return current.path;
+      }
+
+      try {
+        const settings = current.configFile.settings as CSpellUserSettings;
+        updateConfigFileSettings(
+          current.configFile,
+          settings,
+          attribute,
+          word,
+          sortWords,
+        );
+        const serialized = adapter.serializeConfigFile(current.configFile);
+        if (serialized === undefined) {
+          throw new Error('the configuration has no safe writer');
+        }
+        const original = fs.readFileSync(current.path, 'utf8');
+        fs.writeFileSync(
+          current.path,
+          applyLineEndings(serialized, detectLineEnding(original)),
+        );
+      } catch (error) {
+        // The in-memory config was mutated before serialization; discard it so
+        // a later read cannot observe a write that never reached disk.
+        adapter.clearCachedSettingsFiles();
+        throw new ConfigEditError(
+          `Could not update ${current.path}: ${errorMessage(error)}`,
+        );
+      }
+
+      return current.path;
+    });
+  }
+
+  private assertEditable(
+    target: ConfigEditTarget,
+  ): asserts target is ExistingConfigTarget | NewConfigTarget {
     if (target.kind === 'unavailable') {
       throw new ConfigEditError(target.reason);
     }
@@ -390,52 +524,22 @@ export class ConfigEditor {
         `Cannot edit ${target.path}: ${target.reason ?? 'the configuration is read-only.'}`,
       );
     }
+  }
 
-    const sortWords = options.sortWords ?? false;
-
-    if (target.kind === 'new') {
-      try {
-        addWordsToSettings(target.settings, attribute, word, sortWords);
-        fs.writeFileSync(target.path, stringifyJsonc(target.settings, null, 2));
-      } catch (error) {
-        throw new ConfigEditError(
-          `Could not write ${target.path}: ${errorMessage(error)}`,
-        );
-      }
-      return target.path;
-    }
-
-    const engine = this.host.engineForDocument(documentUri);
-    const adapter = this.adapterFor(engine);
-
-    try {
-      const settings = target.configFile.settings as CSpellUserSettings;
-      updateConfigFileSettings(
-        target.configFile,
-        settings,
-        attribute,
-        word,
-        sortWords,
-      );
-      const serialized = adapter.serializeConfigFile(target.configFile);
-      if (serialized === undefined) {
-        throw new Error('the configuration has no safe writer');
-      }
-      const original = fs.readFileSync(target.path, 'utf8');
-      fs.writeFileSync(
-        target.path,
-        applyLineEndings(serialized, detectLineEnding(original)),
-      );
-    } catch (error) {
-      // The in-memory config was mutated before serialization; discard it so
-      // a later read cannot observe a write that never reached disk.
+  private async reloadTarget(
+    adapter: EngineConfigAdapter,
+    target: ExistingConfigTarget | NewConfigTarget,
+  ): Promise<ConfigEditTarget> {
+    if (target.kind === 'existing') {
       adapter.clearCachedSettingsFiles();
-      throw new ConfigEditError(
-        `Could not update ${target.path}: ${errorMessage(error)}`,
-      );
+      return this.readTarget(adapter, target.path);
     }
 
-    return target.path;
+    // Another writer may have created this file while the edit waited for the
+    // lock. Read it instead of overwriting it with the original defaults.
+    if (!fs.existsSync(target.path)) return target;
+    adapter.clearCachedSettingsFiles();
+    return this.readTarget(adapter, target.path);
   }
 
   private adapterFor(engine: CSpellEngine): EngineConfigAdapter {
@@ -590,7 +694,20 @@ function addYamlWord(
   attribute: ConfigWordAttribute,
   word: string,
 ): void {
-  const node = configFile.getNode?.(attribute);
+  let node: YamlArrayNode | undefined;
+  try {
+    node = configFile.getNode?.(attribute);
+  } catch (error) {
+    if (!isYamlAliasNodeError(error)) throw error;
+
+    // cspell-config-lib cannot edit alias nodes. Materialize the alias so the
+    // edit affects only this setting and leaves the anchored list unchanged.
+    const current = getWordList(settings[attribute]);
+    if (current.includes(word)) return;
+    configFile.setValue(attribute, appendWord(current, word));
+    return;
+  }
+
   const current = Array.isArray(node?.value)
     ? (node.value as string[])
     : getWordList(settings[attribute]);
@@ -602,6 +719,13 @@ function addYamlWord(
     return;
   }
   configFile.setValue(attribute, appendWord(current, word));
+}
+
+function isYamlAliasNodeError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes('Unsupported YAML node type: alias')
+  );
 }
 
 function sortYamlWordList(
@@ -702,6 +826,78 @@ function configFilePath(file: string | URL): string {
     return safeFileURLToPath(file.href) ?? file.href;
   }
   return file.href;
+}
+
+/**
+ * Serializes configuration writes by path across all editor instances.
+ *
+ * The server normally has one editor, but memoizing the lock at module scope
+ * also covers a concurrent first-use race that could create two instances.
+ */
+const configWriteLocks = new Map<string, Promise<void>>();
+
+function withConfigWriteLock<T>(
+  key: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = configWriteLocks.get(key) ?? Promise.resolve();
+  const run = previous.then(task);
+  // The tail never rejects so one failed write cannot block later writes.
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  configWriteLocks.set(key, tail);
+  void tail.finally(() => {
+    if (configWriteLocks.get(key) === tail) {
+      configWriteLocks.delete(key);
+    }
+  });
+  return run;
+}
+
+/**
+ * Returns a stable lock key for a configuration path.
+ *
+ * Real paths serialize writes through symlinks. A new file has no real path
+ * yet, so the nearest existing ancestor is resolved and the remaining path is
+ * appended. This keeps the key stable when the same directory is reached
+ * through a symlink alias before the file has been created.
+ */
+function configWriteKey(filePath: string): string {
+  const absolute = path.resolve(filePath);
+  try {
+    return fs.realpathSync(absolute);
+  } catch {
+    return realpathOfExistingAncestor(absolute);
+  }
+}
+
+function realpathOfExistingAncestor(absolute: string): string {
+  let current = absolute;
+  const tail: string[] = [];
+
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...tail);
+    } catch (error) {
+      // Only missing components are moved into the tail. An unreadable path
+      // cannot be canonicalized, so keep the logical key and let the write
+      // report its normal error.
+      if (!isMissingPathError(error)) return absolute;
+
+      const parent = path.dirname(current);
+      if (parent === current) return absolute;
+
+      tail.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 function safeFileURLToPath(uri: string): string | undefined {

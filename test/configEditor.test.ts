@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -13,6 +19,7 @@ import type {
 import {
   ConfigEditError,
   ConfigEditor,
+  createEngineConfigAdapter,
   type ConfigEditorOptions,
   type EngineConfigAdapter,
 } from '../src/config.js';
@@ -32,6 +39,51 @@ function createEngine(): CSpellEngine {
     packagePath: '<bundled>',
     lib: cspellLib,
   };
+}
+
+function createEngineWithLoader(
+  loader: ReturnType<typeof cspellLib.createConfigLoader>,
+): CSpellEngine {
+  return {
+    ...createEngine(),
+    lib: {
+      ...cspellLib,
+      getDefaultConfigLoader: () => loader,
+    } as typeof cspellLib,
+  };
+}
+
+function createSharedConfigEditor(): {
+  editor: ConfigEditor;
+  uriA: string;
+  uriB: string;
+  configPath: string;
+} {
+  const rootA = createTempDir();
+  const rootB = createTempDir();
+  const configPath = path.join(rootA, 'shared.json');
+  writeFileSync(
+    configPath,
+    JSON.stringify({ version: '0.2', words: ['base'] }, null, 2),
+  );
+
+  const engineA = createEngineWithLoader(cspellLib.createConfigLoader());
+  const engineB = createEngineWithLoader(cspellLib.createConfigLoader());
+  const uriA = pathToFileURL(path.join(rootA, 'a.md')).href;
+  const uriB = pathToFileURL(path.join(rootB, 'b.md')).href;
+  const editor = new ConfigEditor(
+    {
+      engineForDocument: (uri) => (uri === uriA ? engineA : engineB),
+      workspaceRootForDocument: (uri) => (uri === uriA ? rootA : rootB),
+    },
+    { configPath },
+  );
+
+  return { editor, uriA, uriB, configPath };
+}
+
+function readJsonConfig(configPath: string): Record<string, unknown> {
+  return JSON.parse(readText(configPath)) as Record<string, unknown>;
 }
 
 function createEditor(
@@ -159,6 +211,127 @@ describe('ConfigEditor JSON and JSONC', () => {
     await editor.addWord(documentUri, 'words', 'alpha');
 
     expect((await readConfig(configPath)).words).toEqual(['alpha']);
+  });
+});
+
+describe('ConfigEditor concurrent and cached writes', () => {
+  test('serializes concurrent writes from independently cached engines', async () => {
+    const { editor, uriA, uriB, configPath } = createSharedConfigEditor();
+
+    await editor.inspect(uriA);
+    await editor.inspect(uriB);
+    await Promise.all([
+      editor.addWord(uriA, 'words', 'alpha'),
+      editor.addWord(uriB, 'words', 'beta'),
+    ]);
+
+    const words = readJsonConfig(configPath).words as string[];
+    const sorted = [...words];
+    // oxlint-disable-next-line unicorn/no-array-sort
+    sorted.sort();
+    expect(sorted).toEqual(['alpha', 'base', 'beta']);
+  });
+
+  test('reloads a config cached by another engine before writing', async () => {
+    const { editor, uriA, uriB, configPath } = createSharedConfigEditor();
+
+    await editor.inspect(uriA);
+    await editor.inspect(uriB);
+    await editor.addWord(uriA, 'words', 'alpha');
+    await editor.addWord(uriB, 'words', 'beta');
+
+    const words = readJsonConfig(configPath).words as string[];
+    const sorted = [...words];
+    // oxlint-disable-next-line unicorn/no-array-sort
+    sorted.sort();
+    expect(sorted).toEqual(['alpha', 'base', 'beta']);
+  });
+
+  test('preserves external edits made after editability was resolved', async () => {
+    const root = createTempDir();
+    const configPath = path.join(root, 'cspell.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ version: '0.2', words: ['base'] }, null, 2),
+    );
+    const { editor, documentUri } = createEditor(root);
+
+    expect(await editor.canEdit(documentUri)).toBe(true);
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          version: '0.2',
+          words: ['base', 'external'],
+          custom: { keep: true },
+        },
+        null,
+        2,
+      ),
+    );
+
+    await editor.addWord(documentUri, 'words', 'beta');
+
+    const settings = readJsonConfig(configPath);
+    expect(settings.words).toEqual(['base', 'external', 'beta']);
+    expect(settings.custom).toEqual({ keep: true });
+  });
+
+  test('serializes new config writes through a directory symlink', async () => {
+    const base = createTempDir();
+    const realRoot = path.join(base, 'real');
+    const aliasRoot = path.join(base, 'alias');
+    mkdirSync(realRoot, { recursive: true });
+    symlinkSync(
+      realRoot,
+      aliasRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const engineA = createEngineWithLoader(cspellLib.createConfigLoader());
+    const engineB = createEngineWithLoader(cspellLib.createConfigLoader());
+    const uriA = pathToFileURL(path.join(realRoot, 'a.md')).href;
+    const uriB = pathToFileURL(path.join(aliasRoot, 'b.md')).href;
+
+    let searches = 0;
+    let releaseSearches!: () => void;
+    const bothSearched = new Promise<void>((resolve) => {
+      releaseSearches = resolve;
+    });
+    const createAdapter = (engine: CSpellEngine): EngineConfigAdapter => {
+      const adapter = createEngineConfigAdapter(engine);
+      return {
+        ...adapter,
+        async searchForConfigFileLocation() {
+          searches += 1;
+          if (searches === 2) releaseSearches();
+          await bothSearched;
+          return undefined;
+        },
+      };
+    };
+
+    const editor = new ConfigEditor(
+      {
+        engineForDocument: (uri) => (uri === uriA ? engineA : engineB),
+        workspaceRootForDocument: (uri) =>
+          uri === uriA ? realRoot : aliasRoot,
+      },
+      { defaultSettings: { version: '0.2', words: ['base'] } },
+      createAdapter,
+    );
+
+    await Promise.all([
+      editor.addWord(uriA, 'words', 'alpha'),
+      editor.addWord(uriB, 'words', 'beta'),
+    ]);
+
+    const words = readJsonConfig(path.join(realRoot, 'cspell.json'))
+      .words as string[];
+    const sorted = [...words];
+    // oxlint-disable-next-line unicorn/no-array-sort
+    sorted.sort();
+    expect(sorted).toEqual(['alpha', 'base', 'beta']);
   });
 });
 
@@ -304,6 +477,69 @@ describe('ConfigEditor YAML', () => {
     await editor.addWord(documentUri, 'words', 'alpha', { sortWords: true });
 
     expect((await readConfig(configPath)).words).toEqual(['alpha', 'Z', 'z']);
+  });
+
+  test('materializes an aliased userWords list instead of failing', async () => {
+    const root = createTempDir();
+    const configPath = path.join(root, 'cspell.config.yaml');
+    writeFileSync(
+      configPath,
+      ['words: &word-list', '  - alpha', 'userWords: *word-list', ''].join(
+        '\n',
+      ),
+    );
+    const { editor, documentUri } = createEditor(root);
+
+    expect(await editor.canEdit(documentUri)).toBe(true);
+    await editor.addWord(documentUri, 'userWords', 'beta');
+
+    const settings = await readConfig(configPath);
+    expect(settings.words).toEqual(['alpha']);
+    expect(settings.userWords).toEqual(['alpha', 'beta']);
+    const text = readText(configPath);
+    expect(text).toContain('words: &word-list');
+    expect(text).not.toContain('userWords: *word-list');
+  });
+
+  test('does not rewrite an aliased list when the word is already present', async () => {
+    const root = createTempDir();
+    const configPath = path.join(root, 'cspell.config.yaml');
+    const original = [
+      'words: &word-list',
+      '  - alpha',
+      'userWords: *word-list',
+      '',
+    ].join('\n');
+    writeFileSync(configPath, original);
+    const { editor, documentUri } = createEditor(root);
+
+    await editor.addWord(documentUri, 'userWords', 'alpha');
+
+    expect(readText(configPath)).toBe(original);
+  });
+
+  test('sorts a materialized alias list when sortWords is enabled', async () => {
+    const root = createTempDir();
+    const configPath = path.join(root, 'cspell.config.yaml');
+    writeFileSync(
+      configPath,
+      [
+        'words: &word-list',
+        '  - zulu',
+        '  - alpha',
+        'userWords: *word-list',
+        '',
+      ].join('\n'),
+    );
+    const { editor, documentUri } = createEditor(root);
+
+    await editor.addWord(documentUri, 'userWords', 'beta', {
+      sortWords: true,
+    });
+
+    const settings = await readConfig(configPath);
+    expect(settings.words).toEqual(['alpha', 'zulu']);
+    expect(settings.userWords).toEqual(['alpha', 'beta', 'zulu']);
   });
 });
 

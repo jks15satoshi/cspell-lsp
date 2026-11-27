@@ -8,7 +8,9 @@ import {
 } from 'bun:test';
 import {
   appendFileSync,
+  chmodSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -20,6 +22,7 @@ import { pathToFileURL } from 'node:url';
 import { defaultConfigFilenames } from 'cspell-lib';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
+import { ConfigEditor } from '../src/config.js';
 import type { CSpellEngine } from '../src/engine.js';
 import { EngineRegistry } from '../src/engine.js';
 import { SettingsResolver } from '../src/settings.js';
@@ -357,4 +360,71 @@ describe('SettingsResolver with real cspell-lib', () => {
       [],
     );
   });
+
+  const canTestReadOnlyFile =
+    process.platform !== 'win32' && process.getuid?.() !== 0;
+
+  test.skipIf(!canTestReadOnlyFile)(
+    'does not keep a failed word addition in cached settings',
+    async () => {
+      const root = createTempDir();
+      const configPath = path.join(root, 'cspell.json');
+      const configWord = `zz${Math.random()
+        .toString(36)
+        .replace(/[^a-z]/g, '')
+        .padEnd(8, 'q')
+        .slice(0, 8)}`;
+      const missingWord = `zz${Math.random()
+        .toString(36)
+        .replace(/[^a-z]/g, '')
+        .padEnd(8, 'w')
+        .slice(0, 8)}`;
+      writeConfig(root, { words: [configWord] });
+
+      const engine = createEngine();
+      const registry = {
+        getForDocument: () => engine,
+        all: () => [engine],
+      } as unknown as EngineRegistry;
+      const resolver = new SettingsResolver(registry);
+      const editor = new ConfigEditor({
+        engineForDocument: () => engine,
+        workspaceRootForDocument: () => root,
+      });
+      const document = TextDocument.create(
+        pathToFileURL(path.join(root, 'fixture.md')).href,
+        'markdown',
+        1,
+        `${configWord} ${missingWord}`,
+      );
+
+      const before = await resolver.getForDocument(document);
+      expect(
+        (await validateTextDocument(document, before.settings, cspellLib)).map(
+          (diagnostic) => diagnostic.message,
+        ),
+      ).toEqual([`"${missingWord}": Unknown word.`]);
+
+      chmodSync(configPath, 0o444);
+      try {
+        await expect(
+          editor.addWord(document.uri, 'words', missingWord),
+        ).rejects.toThrow('Could not update');
+        expect(
+          (JSON.parse(readFileSync(configPath, 'utf8')) as { words: string[] })
+            .words,
+        ).toEqual([configWord]);
+
+        const after = await resolver.getForDocument(document);
+        expect(after.settings.words).toEqual([configWord]);
+        expect(
+          (await validateTextDocument(document, after.settings, cspellLib)).map(
+            (diagnostic) => diagnostic.message,
+          ),
+        ).toEqual([`"${missingWord}": Unknown word.`]);
+      } finally {
+        chmodSync(configPath, 0o644);
+      }
+    },
+  );
 });

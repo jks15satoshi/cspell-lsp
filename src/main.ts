@@ -27,9 +27,11 @@ import {
   type CodeActionDocumentContext,
 } from './codeActions.js';
 import {
+  absoluteWatcherPattern,
   ConfigEditError,
   ConfigEditor,
   configWatcherPatterns,
+  escapeGlobLiteral,
   getConfigFileNames,
 } from './config.js';
 import { EngineRegistry } from './engine.js';
@@ -63,6 +65,7 @@ const documents = new TextDocuments(TextDocument);
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
+let hasRelativePatternSupport = false;
 
 const watchingCustomDictionaries: Set<string> = new Set();
 
@@ -81,6 +84,9 @@ connection.onInitialize((params: InitializeParams) => {
     params.capabilities.workspace &&
     !!params.capabilities.workspace.workspaceFolders
   );
+  hasRelativePatternSupport =
+    !!params.capabilities.workspace?.didChangeWatchedFiles
+      ?.relativePatternSupport;
 
   workspaceRoots = collectWorkspaceRoots(params);
 
@@ -275,6 +281,7 @@ async function registerWatchers(registry: EngineRegistry): Promise<void> {
         : undefined,
     configPath: options.config,
     globalConfigRoots: [...globalRoots],
+    relativePatternSupport: hasRelativePatternSupport,
   });
   const watchers: FileSystemWatcher[] = patterns.map(({ baseUri, pattern }) =>
     baseUri ? { globPattern: { baseUri, pattern } } : { globPattern: pattern },
@@ -296,11 +303,14 @@ function addDictionaryWatcher(dictionaryPath: string): void {
   if (watchingCustomDictionaries.has(dictionaryPath)) return;
 
   const baseUri = pathToFileURL(path.dirname(dictionaryPath)).href;
-  const pattern = path.basename(dictionaryPath);
+  const pattern = escapeGlobLiteral(path.basename(dictionaryPath));
+  const globPattern = hasRelativePatternSupport
+    ? { baseUri, pattern }
+    : absoluteWatcherPattern(baseUri, pattern);
   watchingCustomDictionaries.add(dictionaryPath);
   void connection.client
     .register(DidChangeWatchedFilesNotification.type, {
-      watchers: [{ globPattern: { baseUri, pattern } }],
+      watchers: [{ globPattern }],
     })
     .catch((error) => {
       watchingCustomDictionaries.delete(dictionaryPath);
@@ -344,6 +354,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         await ensureConfigEditor()
       ).addWord(uri!, attribute, word, { sortWords: options.sortWords });
     } catch (error) {
+      // A failed write can leave mutated settings in the resolver cache, so
+      // reload from disk before returning the error.
+      await revalidateAllOpenDocuments();
       if (error instanceof ConfigEditError) {
         return { error: error.message };
       }

@@ -1,20 +1,27 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import * as cspellLib from 'cspell-lib';
 import type { ICSpellConfigFile } from 'cspell-lib';
 
 import {
+  absoluteWatcherPattern,
   configReadOnlyReason,
   configWatcherGlobs,
   configWatcherPatterns,
   createEngineConfigAdapter,
+  escapeGlobLiteral,
   getConfigFileNames,
 } from '../src/config.js';
 import type { CSpellEngine, CSpellLib } from '../src/engine.js';
 import { cleanupTempDirs, createTempDir } from './helpers/workspace.js';
 
 afterEach(cleanupTempDirs);
+
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, '/');
+}
 
 function createEngine(lib: CSpellLib = cspellLib): CSpellEngine {
   return {
@@ -178,6 +185,100 @@ describe('config watcher patterns', () => {
         fallbackFileNames: ['cspell.json', 'package.json'],
       }),
     ).toEqual([{ pattern: '**/{cspell.json,package.json}' }]);
+  });
+
+  test('uses absolute string globs without relative pattern support', () => {
+    const projectRoot = createTempDir();
+    const globalRoot = createTempDir();
+    const explicitPath = path.join(projectRoot, '.config', 'cspell.yaml');
+
+    expect(
+      configWatcherPatterns({
+        roots: [
+          {
+            root: projectRoot,
+            fileNames: ['cspell.json', 'package.json'],
+          },
+        ],
+        configPath: explicitPath,
+        globalConfigRoots: [globalRoot],
+        relativePatternSupport: false,
+      }),
+    ).toEqual([
+      {
+        pattern: `${normalizePath(projectRoot)}/**/{cspell.json,package.json}`,
+      },
+      { pattern: normalizePath(explicitPath) },
+      { pattern: `${normalizePath(globalRoot)}/cspell.json` },
+    ]);
+  });
+
+  test('converts a watcher base URI to an absolute glob', () => {
+    const root = createTempDir();
+    const expected = `${normalizePath(root)}/**/cspell.json`;
+
+    expect(
+      absoluteWatcherPattern(pathToFileURL(root).href, '**/cspell.json'),
+    ).toBe(expected);
+  });
+
+  test('escapes glob metacharacters in literal path segments', () => {
+    expect(escapeGlobLiteral('plain.json')).toBe('plain.json');
+    expect(escapeGlobLiteral('br[ack]et{1}*?')).toBe(
+      'br[[]ack[]]et[{]1[}][*][?]',
+    );
+    expect(escapeGlobLiteral('back\\slash')).toBe('back[\\\\]slash');
+  });
+
+  test.skipIf(process.platform === 'win32')(
+    'preserves a literal POSIX backslash in an absolute watcher path',
+    () => {
+      const base = '/tmp/back\\slash';
+
+      expect(
+        absoluteWatcherPattern(pathToFileURL(base).href, '**/cspell.json'),
+      ).toBe('/tmp/back[\\\\]slash/**/cspell.json');
+    },
+  );
+
+  test.skipIf(process.platform === 'win32')(
+    'escapes glob metacharacters in an absolute watcher path',
+    () => {
+      const base = '/tmp/br[ack]et{1}*?';
+
+      expect(
+        absoluteWatcherPattern(pathToFileURL(base).href, '**/cspell.json'),
+      ).toBe('/tmp/br[[]ack[]]et[{]1[}][*][?]/**/cspell.json');
+    },
+  );
+
+  test('escapes a literal explicit config name for relative and absolute watchers', () => {
+    const projectRoot = createTempDir();
+    const explicitPath = path.join(projectRoot, '.config', 'cspell[1].yaml');
+
+    expect(
+      configWatcherPatterns({
+        roots: [],
+        configPath: explicitPath,
+      }),
+    ).toEqual([
+      {
+        baseUri: pathToFileURL(path.dirname(explicitPath)).href,
+        pattern: 'cspell[[]1[]].yaml',
+      },
+    ]);
+
+    expect(
+      configWatcherPatterns({
+        roots: [],
+        configPath: explicitPath,
+        relativePatternSupport: false,
+      }),
+    ).toEqual([
+      {
+        pattern: `${normalizePath(path.dirname(explicitPath))}/cspell[[]1[]].yaml`,
+      },
+    ]);
   });
 });
 
