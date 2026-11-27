@@ -82,6 +82,16 @@ Notes:
   direct invocation returns an error.
 - Edits are not byte-for-byte: serializers may normalize whitespace and
   formatting, although existing line endings are restored.
+- A YAML `words` or `userWords` value that is an alias is materialized into a
+  concrete list when that setting is edited; the anchored list is left
+  unchanged. A comment attached to the alias itself is not preserved.
+- Configuration edits are serialized per resolved file path within one server
+  process, so concurrent add-word requests do not overwrite each other, even
+  when the same directory is opened through a symlink alias. External
+  processes are not locked.
+- Clients that do not advertise relative-pattern support receive absolute
+  string watcher globs for configuration and dictionary files. Literal path
+  segments in those globs are escaped for glob syntax.
 - When no project config exists and `--config` is not set, the server creates
   `cspell.json` at the workspace root.
 - An explicit `--config` file must already exist; the server does not guess a
