@@ -47,5 +47,5 @@ This file records only conventions that tooling cannot enforce. Do not restate r
 ## Licensing
 
 - Keep `GPL-3.0-only`. Do not remove or alter the copyright and origin notices in `LICENSE` and `NOTICE`.
-- When modifying upstream-derived code, add a modification notice to `NOTICE` as required by GPL-3.0 section 5(a).
+- Keep one umbrella modification notice in `NOTICE` (origin and date). GPL-3.0 §5(a) needs a notice plus a relevant date, not an entry per change; details live in git history. Update `NOTICE` only when attribution or the date changes.
 - Any third-party code must be compatible with `GPL-3.0-only` and attributed in `NOTICE`.
