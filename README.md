@@ -68,7 +68,7 @@ By default, the server resolves the CSpell engine for each workspace folder in t
 
 Local versions must be 8 or newer and expose the API used by the server. The server falls back to the bundled engine when packages are missing, versions are older than 8, imports fail, or the required API is unavailable. The startup log includes the reason for a fallback.
 
-Package directories are resolved with Node's ESM import conditions, in declaration order. A `require`-only entry is not selected by that resolution; pass the entry file to `--engine` when it is the only supported entry point.
+Package directories are resolved with Node's ESM import conditions, in declaration order. When `exports` is present and not `null`, only `exports` selects the entry point; `module`, `main`, and `index.js` are used only when `exports` is absent or `null`. An active condition mapped to `null` blocks resolution. A `require`-only entry is not selected by that resolution; pass the entry file to `--engine` when it is the only supported entry point.
 
 An invalid path passed to `--engine` is treated as a configuration error. The server stops with a clear message instead of silently falling back to the bundled engine.
 
