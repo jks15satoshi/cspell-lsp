@@ -29,6 +29,7 @@ import {
 } from './codeActions.js';
 import { EngineRegistry } from './engine.js';
 import { SettingsResolver } from './settings.js';
+import { cloneSettingsForConfig } from './configWords.js';
 import commandLineArgs from 'command-line-args';
 
 const optionDefinitions = [
@@ -352,7 +353,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         };
       }
       configPath = path.join(workspaceRoot, 'cspell.json');
-      currentSettings = defaultSettings;
+      // `defaultSettings` is shared by every workspace folder. Clone the
+      // arrays that adding and sorting mutate before writing a new config.
+      currentSettings = cloneSettingsForConfig(defaultSettings);
     }
 
     if (!configPath.endsWith('.json')) {

@@ -44,6 +44,13 @@ interface PackageInfo {
   json: PackageJson;
 }
 
+interface RootEntry {
+  /** Logical workspace path used by callers and logs. */
+  logical: string;
+  /** Logical and real paths that identify this workspace folder. */
+  aliases: readonly string[];
+}
+
 const BUNDLED_PACKAGE_PATH = '<bundled>';
 const MINIMUM_MAJOR_VERSION = 8;
 
@@ -91,27 +98,44 @@ export function getBundledVersion(): string {
  * Selection happens once at startup; installs are not watched for changes.
  */
 export class EngineRegistry {
+  private readonly realParentCache = new Map<string, string>();
+
   private constructor(
     private readonly workspaceRoots: readonly string[],
+    private readonly rootEntries: readonly RootEntry[],
     private readonly enginesByRoot: ReadonlyMap<string, CSpellEngine>,
     private readonly fallbackEngine: CSpellEngine,
   ) {}
 
   static async create(options: EngineRegistryOptions): Promise<EngineRegistry> {
     const roots = uniqueRoots(options.roots);
+    const rootEntries = roots.map((root) => ({
+      logical: root,
+      aliases: getRootAliases(root),
+    }));
     const log = options.log ?? (() => {});
     const override = options.engineOverride?.trim();
 
     if (override === 'bundled') {
       const engine = createBundledEngine('bundled');
       logEngine(engine, log);
-      return new EngineRegistry(roots, mapRootsToEngine(roots, engine), engine);
+      return new EngineRegistry(
+        roots,
+        rootEntries,
+        mapRootsToEngine(roots, engine),
+        engine,
+      );
     }
 
     if (override) {
       const engine = await loadExplicitEngine(override);
       logEngine(engine, log);
-      return new EngineRegistry(roots, mapRootsToEngine(roots, engine), engine);
+      return new EngineRegistry(
+        roots,
+        rootEntries,
+        mapRootsToEngine(roots, engine),
+        engine,
+      );
     }
 
     if (roots.length === 0) {
@@ -121,7 +145,7 @@ export class EngineRegistry {
         'no workspace folder',
       );
       logEngine(engine, log);
-      return new EngineRegistry([], new Map(), engine);
+      return new EngineRegistry([], [], new Map(), engine);
     }
 
     const enginesByRoot = new Map<string, CSpellEngine>();
@@ -136,7 +160,12 @@ export class EngineRegistry {
       undefined,
       'document is outside the workspace',
     );
-    return new EngineRegistry(roots, enginesByRoot, fallbackEngine);
+    return new EngineRegistry(
+      roots,
+      rootEntries,
+      enginesByRoot,
+      fallbackEngine,
+    );
   }
 
   get roots(): readonly string[] {
@@ -144,7 +173,10 @@ export class EngineRegistry {
   }
 
   getForRoot(root: string): CSpellEngine {
-    return this.enginesByRoot.get(path.resolve(root)) ?? this.fallbackEngine;
+    const entry = this.findRootEntry(path.resolve(root));
+    return entry
+      ? (this.enginesByRoot.get(entry.logical) ?? this.fallbackEngine)
+      : this.fallbackEngine;
   }
 
   getForDocument(uri: string): CSpellEngine {
@@ -161,7 +193,55 @@ export class EngineRegistry {
     } catch {
       return undefined;
     }
-    return findOwningRoot(filePath, this.workspaceRoots);
+    return this.findOwningRoot(filePath);
+  }
+
+  private findRootEntry(rootPath: string): RootEntry | undefined {
+    const candidates = getFinalPathCandidates(rootPath);
+    return this.rootEntries.find((entry) =>
+      entry.aliases.some((alias) => candidates.includes(alias)),
+    );
+  }
+
+  private findOwningRoot(filePath: string): string | undefined {
+    const absolute = path.resolve(filePath);
+    const direct = this.matchRoot(absolute);
+    if (direct) return direct;
+
+    // A client can address a real workspace through a symlinked path. Fall
+    // back to the containing directory's real path only when the URI itself
+    // did not match a root, so symlinked subdirectories keep their URI root.
+    const realParent = this.getRealParent(path.dirname(absolute));
+    if (!realParent) return undefined;
+    return this.matchRoot(path.join(realParent, path.basename(absolute)));
+  }
+
+  private matchRoot(filePath: string): string | undefined {
+    let best: { root: string; length: number } | undefined;
+    for (const entry of this.rootEntries) {
+      for (const alias of entry.aliases) {
+        if (
+          isPathInside(filePath, alias) &&
+          (!best || alias.length > best.length)
+        ) {
+          best = { root: entry.logical, length: alias.length };
+        }
+      }
+    }
+    return best?.root;
+  }
+
+  private getRealParent(parent: string): string | undefined {
+    const cached = this.realParentCache.get(parent);
+    if (cached) return cached;
+    try {
+      const realParent = fs.realpathSync(parent);
+      this.realParentCache.set(parent, realParent);
+      return realParent;
+    } catch {
+      // A directory that does not exist can be retried after it is created.
+      return undefined;
+    }
   }
 
   /** Distinct engines used by the registry, for cache invalidation. */
@@ -182,6 +262,30 @@ export class EngineRegistry {
 
 function uniqueRoots(roots: readonly string[]): string[] {
   return [...new Set(roots.map((root) => path.resolve(root)))];
+}
+
+function getRootAliases(root: string): string[] {
+  const logical = path.resolve(root);
+  const aliases = [logical];
+  try {
+    const realPath = fs.realpathSync(logical);
+    if (realPath !== logical) aliases.push(realPath);
+  } catch {
+    // A root that does not exist yet is still matchable by its logical path.
+  }
+  return aliases;
+}
+
+function getFinalPathCandidates(filePath: string): string[] {
+  const absolute = path.resolve(filePath);
+  const candidates = [absolute];
+  try {
+    const realPath = fs.realpathSync(absolute);
+    if (realPath !== absolute) candidates.push(realPath);
+  } catch {
+    // A missing path can still be matched by its logical form.
+  }
+  return candidates;
 }
 
 function mapRootsToEngine(
@@ -512,52 +616,74 @@ function hasNoAddonsFlag(): boolean {
   return nodeOptions ? /(?:^|\s)--no-addons(?:\s|$)/.test(nodeOptions) : false;
 }
 
+type ExportResolution =
+  | { kind: 'target'; target: string }
+  | { kind: 'no-match' }
+  | { kind: 'blocked' };
+
+const NO_EXPORT_MATCH: ExportResolution = { kind: 'no-match' };
+const BLOCKED_EXPORT: ExportResolution = { kind: 'blocked' };
+
+/**
+ * Resolves the package entry using Node ESM rules.
+ *
+ * `exports` takes precedence; legacy fields are considered only when it is
+ * absent or explicitly `null`. A failed conditional export is final.
+ */
 function resolvePackageEntry(packageInfo: PackageInfo): string | undefined {
   const conditions = getImportConditions();
-  const exportTarget =
-    packageInfo.json.exports === undefined
-      ? undefined
-      : resolveExportTarget(packageInfo.json.exports, conditions);
-  const candidates = [
-    exportTarget,
+  const exportsField = packageInfo.json.exports;
+
+  if (exportsField !== undefined && exportsField !== null) {
+    const resolution = resolveExportTarget(exportsField, conditions);
+    return resolution.kind === 'target'
+      ? findFileEntry(packageInfo.dir, resolution.target)
+      : undefined;
+  }
+
+  for (const candidate of [
     packageInfo.json.module,
     packageInfo.json.main,
     'index.js',
-  ];
-
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    const entry = path.resolve(packageInfo.dir, candidate);
-    try {
-      if (fs.statSync(entry).isFile()) return entry;
-    } catch {
-      // Try the next candidate.
-    }
+  ]) {
+    const entry = candidate
+      ? findFileEntry(packageInfo.dir, candidate)
+      : undefined;
+    if (entry) return entry;
   }
   return undefined;
+}
+
+function findFileEntry(packageDir: string, target: string): string | undefined {
+  const entry = path.resolve(packageDir, target);
+  try {
+    return fs.statSync(entry).isFile() ? entry : undefined;
+  } catch {
+    // A target that does not exist cannot be selected.
+    return undefined;
+  }
 }
 
 function resolveExportTarget(
   exportsField: unknown,
   conditions: ReadonlySet<string>,
-): string | undefined {
-  if (typeof exportsField === 'string') return exportsField;
-  if (Array.isArray(exportsField)) {
-    for (const candidate of exportsField) {
-      const target = selectConditionalTarget(candidate, conditions);
-      if (target) return target;
-    }
-    return undefined;
+): ExportResolution {
+  if (typeof exportsField === 'string') {
+    return { kind: 'target', target: exportsField };
   }
-  if (!exportsField || typeof exportsField !== 'object') return undefined;
+  if (Array.isArray(exportsField)) {
+    return selectConditionalTarget(exportsField, conditions);
+  }
+  if (exportsField === null) return BLOCKED_EXPORT;
+  if (typeof exportsField !== 'object') return NO_EXPORT_MATCH;
 
   const record = exportsField as Record<string, unknown>;
   const hasSubpaths = Object.keys(record).some((key) => key.startsWith('.'));
   if (hasSubpaths) {
-    const rootExport = record['.'];
-    return rootExport === undefined
-      ? undefined
-      : selectConditionalTarget(rootExport, conditions);
+    if (!Object.prototype.hasOwnProperty.call(record, '.')) {
+      return NO_EXPORT_MATCH;
+    }
+    return selectConditionalTarget(record['.'], conditions);
   }
   return selectConditionalTarget(record, conditions);
 }
@@ -566,50 +692,50 @@ function resolveExportTarget(
  * Selects an export target using Node's conditional-export rules.
  *
  * Conditions are evaluated in declaration order, and `default` matches at its
- * own position rather than as a lower-priority fallback. A condition whose
- * nested target resolves to nothing does not end the search.
+ * own position rather than as a lower-priority fallback. An active condition
+ * whose target is `null` blocks resolution; a condition with no nested match
+ * does not end the search. Array targets keep looking after `null` in case a
+ * later target is valid.
  */
 function selectConditionalTarget(
   value: unknown,
   conditions: ReadonlySet<string>,
-): string | undefined {
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) {
-    for (const candidate of value) {
-      const target = selectConditionalTarget(candidate, conditions);
-      if (target) return target;
-    }
-    return undefined;
+): ExportResolution {
+  if (typeof value === 'string') {
+    return { kind: 'target', target: value };
   }
-  if (!value || typeof value !== 'object') return undefined;
+  if (value === null) return BLOCKED_EXPORT;
+  if (Array.isArray(value)) {
+    let blocked = false;
+    for (const candidate of value) {
+      const resolved = selectConditionalTarget(candidate, conditions);
+      if (resolved.kind === 'target') return resolved;
+      if (resolved.kind === 'blocked') blocked = true;
+    }
+    return blocked ? BLOCKED_EXPORT : NO_EXPORT_MATCH;
+  }
+  if (!value || typeof value !== 'object') return NO_EXPORT_MATCH;
 
   const record = value as Record<string, unknown>;
   for (const [condition, target] of Object.entries(record)) {
     if (condition === 'default' || conditions.has(condition)) {
       const resolved = selectConditionalTarget(target, conditions);
-      if (resolved) return resolved;
+      if (resolved.kind === 'target' || resolved.kind === 'blocked') {
+        return resolved;
+      }
     }
   }
-  return undefined;
+  return NO_EXPORT_MATCH;
 }
 
-function findOwningRoot(
-  filePath: string,
-  roots: readonly string[],
-): string | undefined {
-  let best: string | undefined;
-  for (const root of roots) {
-    const relative = path.relative(root, filePath);
-    const inside =
-      relative === '' ||
-      (relative !== '..' &&
-        !relative.startsWith(`..${path.sep}`) &&
-        !path.isAbsolute(relative));
-    if (inside && (!best || root.length > best.length)) {
-      best = root;
-    }
-  }
-  return best;
+function isPathInside(filePath: string, root: string): boolean {
+  const relative = path.relative(root, filePath);
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }
 
 function parseMajorVersion(version: string | undefined): number | undefined {

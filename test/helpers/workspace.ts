@@ -123,6 +123,8 @@ export interface ConditionalCSpellLibEntry {
 
 export interface ConditionalCSpellLibOptions {
   version?: string;
+  main?: string;
+  module?: string;
 }
 
 /**
@@ -143,6 +145,8 @@ export function writeConditionalCSpellLib(
       name: 'cspell-lib',
       version: options.version ?? '9.0.0',
       type: 'module',
+      ...(options.main ? { main: options.main } : {}),
+      ...(options.module ? { module: options.module } : {}),
       exports: { '.': exportsField },
     }),
   );

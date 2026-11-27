@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { realpathSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -51,10 +57,28 @@ function writeConditionalPackage(
   root: string,
   exportsField: Record<string, unknown>,
   entries: readonly { file: string; marker: string }[],
+  options: { main?: string; module?: string } = {},
 ): string {
   const packageDirectory = path.join(root, 'node_modules', 'cspell-lib');
-  writeConditionalCSpellLib(packageDirectory, exportsField, entries);
+  writeConditionalCSpellLib(packageDirectory, exportsField, entries, options);
   return packageDirectory;
+}
+
+function writeNullExportsPackage(root: string): void {
+  const packageDirectory = path.join(root, 'node_modules', 'cspell-lib');
+  writeFakeCSpellLib(packageDirectory, { version: '9.0.0', marker: 'main' });
+  const packageJsonPath = path.join(packageDirectory, 'package.json');
+  const packageJson = JSON.parse(
+    readFileSync(packageJsonPath, 'utf8'),
+  ) as Record<string, unknown>;
+  writeFileSync(
+    packageJsonPath,
+    JSON.stringify({
+      ...packageJson,
+      main: './index.js',
+      exports: null,
+    }),
+  );
 }
 
 describe('EngineRegistry conditional exports', () => {
@@ -114,10 +138,31 @@ describe('EngineRegistry conditional exports', () => {
     expect(engineMarker(registry, documentUri(root))).toBe('node');
   });
 
-  test('falls back when only a require condition is exported', async () => {
+  test('does not fall back to legacy entries for a require-only export', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(
+      root,
+      { require: './cjs.js' },
+      [
+        { file: './cjs.js', marker: 'require' },
+        { file: './module.js', marker: 'module' },
+        { file: './main.js', marker: 'main' },
+      ],
+      { module: './module.js', main: './main.js' },
+    );
+
+    const { registry } = await createRegistry([root]);
+    const engine = registry.getForDocument(documentUri(root));
+
+    expect(engine.packagePath).toBe('<bundled>');
+    expect(engine.fallbackReason).toContain('no resolvable entry point');
+  });
+
+  test('does not fall back to index.js for a require-only export', async () => {
     const root = createTempDir();
     writeConditionalPackage(root, { require: './cjs.js' }, [
       { file: './cjs.js', marker: 'require' },
+      { file: './index.js', marker: 'index' },
     ]);
 
     const { registry } = await createRegistry([root]);
@@ -127,12 +172,53 @@ describe('EngineRegistry conditional exports', () => {
     expect(engine.fallbackReason).toContain('no resolvable entry point');
   });
 
+  test('stops at an active condition mapped to null', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(root, { import: null, default: './generic.js' }, [
+      { file: './generic.js', marker: 'generic' },
+    ]);
+
+    const { registry } = await createRegistry([root]);
+    const engine = registry.getForDocument(documentUri(root));
+
+    expect(engine.packagePath).toBe('<bundled>');
+    expect(engine.fallbackReason).toContain('no resolvable entry point');
+  });
+
+  test('does not fall back when the exported target is missing', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(
+      root,
+      { import: './missing.js' },
+      [{ file: './main.js', marker: 'main' }],
+      { main: './main.js' },
+    );
+
+    const { registry } = await createRegistry([root]);
+    const engine = registry.getForDocument(documentUri(root));
+
+    expect(engine.packagePath).toBe('<bundled>');
+    expect(engine.fallbackReason).toContain('no resolvable entry point');
+  });
+
+  test('treats exports: null as absent and uses main', async () => {
+    const root = createTempDir();
+    writeNullExportsPackage(root);
+
+    const { registry } = await createRegistry([root]);
+    expect(engineMarker(registry, documentUri(root))).toBe('main');
+  });
+
   test('rejects an explicit package with only a require condition', async () => {
     const root = createTempDir();
     const packageDirectory = writeConditionalPackage(
       root,
       { require: './cjs.js' },
-      [{ file: './cjs.js', marker: 'require' }],
+      [
+        { file: './cjs.js', marker: 'require' },
+        { file: './main.js', marker: 'main' },
+      ],
+      { main: './main.js' },
     );
 
     await expect(createRegistry([root], packageDirectory)).rejects.toThrow(
@@ -409,5 +495,31 @@ describe('EngineRegistry multi-root workspaces', () => {
     expect(registry.getForDocument(documentUri(outsideRoot)).packagePath).toBe(
       '<bundled>',
     );
+  });
+
+  test('matches a symlinked root by logical and real document paths', async () => {
+    const realRoot = createTempDir();
+    mkdirSync(path.join(realRoot, 'src'), { recursive: true });
+    const linkRoot = path.join(createTempDir(), 'workspace');
+    symlinkSync(
+      realRoot,
+      linkRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeFakeCSpellLib(path.join(realRoot, 'node_modules', 'cspell-lib'), {
+      version: '9.3.0',
+      marker: 'symlinked',
+    });
+
+    const { registry } = await createRegistry([linkRoot]);
+
+    expect(engineMarker(registry, documentUri(realRoot))).toBe('symlinked');
+    expect(engineMarker(registry, documentUri(linkRoot))).toBe('symlinked');
+    expect(registry.rootForDocument(documentUri(realRoot))).toBe(linkRoot);
+    expect(registry.getForRoot(realRoot).version).toBe('9.3.0');
+
+    const { registry: realRegistry } = await createRegistry([realRoot]);
+    expect(engineMarker(realRegistry, documentUri(linkRoot))).toBe('symlinked');
+    expect(realRegistry.rootForDocument(documentUri(linkRoot))).toBe(realRoot);
   });
 });
