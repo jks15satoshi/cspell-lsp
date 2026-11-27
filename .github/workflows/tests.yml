@@ -3,7 +3,29 @@ name: Tests
 on:
   push:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'tsconfig.json'
+      - '.oxlintrc.json'
+      - '.oxfmtrc.json'
+      - '.gitattributes'
+      - '.github/workflows/tests.yml'
   pull_request:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'bun.lock'
+      - 'tsconfig.json'
+      - '.oxlintrc.json'
+      - '.oxfmtrc.json'
+      - '.gitattributes'
+      - '.github/workflows/tests.yml'
   workflow_dispatch:
 
 permissions:
