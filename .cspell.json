@@ -3,12 +3,6 @@
   "version": "0.2",
   "language": "en",
   "useGitignore": true,
-  "dictionaries": [
-    "en_us",
-    "en-gb"
-  ],
-  "words": [
-    "lockfiles",
-    "vlabo"
-  ]
+  "dictionaries": ["en_us", "en-gb"],
+  "words": ["lockfiles", "monorepo", "vlabo"]
 }

@@ -1,15 +1,9 @@
-import {
-  createTextDocument,
-  CSpellUserSettings,
-  DocumentValidator,
-  IssueType,
-  Text as TextUtil,
-} from 'cspell-lib';
+import type { CSpellUserSettings, IssueType } from 'cspell-lib';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 import type { Diagnostic } from 'vscode-languageserver-types';
 import { DiagnosticSeverity } from 'vscode-languageserver-types';
 
-export { createTextDocument, validateText } from 'cspell-lib';
+import type { CSpellLib } from './engine.js';
 
 export type ExtensionId = 'cSpell';
 export const defaultCheckLimit = 1 << 20; // 1MB
@@ -40,6 +34,7 @@ export interface SpellingDiagnostic extends Diagnostic {
 export async function validateTextDocument(
   textDocument: TextDocument,
   settings: CSpellUserSettings,
+  cSpell: CSpellLib,
 ): Promise<Diagnostic[]> {
   // const { severity, severityFlaggedWords } = calcSeverity(textDocument.uri, options);
   const defaultSeverity = DiagnosticSeverity.Information;
@@ -52,8 +47,12 @@ export async function validateTextDocument(
     languageId: textDocument.languageId,
     version: textDocument.version,
   };
-  const doc = createTextDocument(docInfo);
-  const docVal = new DocumentValidator(doc, { noConfigSearch: true }, settings);
+  const doc = cSpell.createTextDocument(docInfo);
+  const docVal = new cSpell.DocumentValidator(
+    doc,
+    { noConfigSearch: true },
+    settings,
+  );
   await docVal.prepare();
   const r = await docVal.checkDocumentAsync(true);
   const diags = r
@@ -94,7 +93,7 @@ export async function validateTextDocument(
           issueType,
           isFlagged,
           isSuggestion: undefined, // This is a future enhancement to CSpell.
-          suggestions: haveSuggestionsMatchCase(text, sugs),
+          suggestions: haveSuggestionsMatchCase(text, sugs, cSpell.Text),
         };
         const diag: SpellingDiagnostic = {
           severity,
@@ -113,12 +112,13 @@ export async function validateTextDocument(
 function haveSuggestionsMatchCase(
   example: string,
   suggestions: Suggestion[] | undefined,
+  text: CSpellLib['Text'],
 ): Suggestion[] | undefined {
   if (!suggestions) return undefined;
-  if (TextUtil.isLowerCase(example)) return suggestions;
+  if (text.isLowerCase(example)) return suggestions;
   return suggestions.map((sug) =>
-    TextUtil.isLowerCase(sug.word)
-      ? { ...sug, word: TextUtil.matchCase(example, sug.word) }
+    text.isLowerCase(sug.word)
+      ? { ...sug, word: text.matchCase(example, sug.word) }
       : sug,
   );
 }

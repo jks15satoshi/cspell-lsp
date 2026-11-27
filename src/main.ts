@@ -16,35 +16,33 @@ import {
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { parse as parseJsonc, stringify as stringifyJsonc } from 'comment-json';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import {
-  constructSettingsForText,
-  CSpellSettings,
-  CSpellUserSettings,
-  getDefaultConfigLoader,
-  getDefaultSettings,
-  getGlobalSettingsAsync,
-  mergeSettings,
-  readSettings,
-  refreshDictionaryCache,
-} from 'cspell-lib';
+import type { CSpellUserSettings } from 'cspell-lib';
 
 import * as Validator from './validator.js';
-import { createOnCodeActionHandler } from './codeActions.js';
+import {
+  createOnCodeActionHandler,
+  type CodeActionDocumentContext,
+} from './codeActions.js';
+import { EngineRegistry } from './engine.js';
+import { SettingsResolver } from './settings.js';
+import { cloneSettingsForConfig } from './configWords.js';
 import commandLineArgs from 'command-line-args';
 
 const optionDefinitions = [
   { name: 'config', alias: 'c', type: String, defaultValue: null },
   { name: 'sortWords', type: Boolean, defaultValue: false },
   { name: 'stdio', type: String },
+  { name: 'engine', type: String, defaultValue: null },
 ];
 
 const options = commandLineArgs(optionDefinitions);
 
 let defaultSettings: CSpellUserSettings = {};
+let workspaceRoots: string[] = [];
 
 const COMMANDS = [
   'AddToUserWordsConfig',
@@ -61,9 +59,11 @@ const documents = new TextDocuments(TextDocument);
 
 let hasConfigurationCapability = false;
 let hasWorkspaceFolderCapability = false;
-let workspaceRoot: string | undefined;
 
 const watchingCustomDictionaries: Set<string> = new Set();
+
+let engineRegistryPromise: Promise<EngineRegistry> | undefined;
+let settingsResolver: SettingsResolver | undefined;
 
 connection.onInitialize((params: InitializeParams) => {
   defaultSettings = params.initializationOptions?.defaultSettings ?? {};
@@ -77,13 +77,7 @@ connection.onInitialize((params: InitializeParams) => {
     !!params.capabilities.workspace.workspaceFolders
   );
 
-  if (params.workspaceFolders?.length) {
-    workspaceRoot = fileURLToPath(params.workspaceFolders[0].uri);
-  } else if (params.rootUri) {
-    workspaceRoot = fileURLToPath(params.rootUri);
-  } else if (params.rootPath) {
-    workspaceRoot = params.rootPath;
-  }
+  workspaceRoots = collectWorkspaceRoots(params);
 
   const result: InitializeResult = {
     capabilities: {
@@ -114,10 +108,120 @@ connection.onInitialized(async () => {
   }
   if (hasWorkspaceFolderCapability) {
     connection.workspace.onDidChangeWorkspaceFolders((_event) => {
-      connection.console.log('Workspace folder change event received.');
+      connection.console.log(
+        'Workspace folder change event received. Restart the server to apply engine changes.',
+      );
     });
   }
 
+  try {
+    const registry = await getEngineRegistry();
+    settingsResolver = createSettingsResolver(registry);
+    await registerWatchers(registry);
+  } catch (error) {
+    const message = `CSpell engine could not be initialized: ${errorMessage(error)}`;
+    process.stderr.write(`cspell-lsp: ${message}\n`);
+    connection.console.error(message);
+    connection.dispose();
+    // Give the error notification a chance to reach the client before exiting.
+    setTimeout(() => process.exit(1), 100);
+  }
+});
+
+connection.onDidChangeWatchedFiles(async (change) => {
+  connection.console.log(
+    'Configuration file changed. Revalidating all open documents.',
+  );
+  const customDictionaryChanged = change.changes.some((changedFile) =>
+    isWatchingDictionary(changedFile.uri),
+  );
+  if (customDictionaryChanged) {
+    try {
+      await (await ensureSettingsResolver()).refreshDictionaries();
+    } catch (error) {
+      connection.console.error(
+        `Failed to refresh CSpell dictionaries: ${errorMessage(error)}`,
+      );
+    }
+  }
+  await revalidateAllOpenDocuments();
+});
+
+connection.onCodeAction(
+  createOnCodeActionHandler(documents, getDocumentContext),
+);
+
+// This event is emitted when the text document first opened or when its content has changed.
+documents.onDidChangeContent((change) => {
+  void validateTextDocument(change.document);
+});
+
+async function getDocumentContext(
+  textDocument: TextDocument,
+): Promise<CodeActionDocumentContext> {
+  return (await ensureSettingsResolver()).getForDocument(textDocument);
+}
+
+async function validateTextDocument(textDocument: TextDocument): Promise<void> {
+  try {
+    const { engine, settings } = await getDocumentContext(textDocument);
+    connection.sendDiagnostics({
+      uri: textDocument.uri,
+      diagnostics: await Validator.validateTextDocument(
+        textDocument,
+        settings,
+        engine.lib,
+      ),
+    });
+  } catch (error) {
+    connection.console.error(
+      `Failed to validate ${textDocument.uri}: ${errorMessage(error)}`,
+    );
+  }
+}
+
+async function revalidateAllOpenDocuments(): Promise<void> {
+  try {
+    (await ensureSettingsResolver()).clear();
+  } catch (error) {
+    connection.console.error(
+      `Failed to reload CSpell settings: ${errorMessage(error)}`,
+    );
+    return;
+  }
+  for (const doc of documents.all()) {
+    void validateTextDocument(doc);
+  }
+}
+
+function getEngineRegistry(): Promise<EngineRegistry> {
+  if (!engineRegistryPromise) {
+    engineRegistryPromise = EngineRegistry.create({
+      roots: workspaceRoots,
+      engineOverride: options.engine,
+      log: (message) => connection.console.info(message),
+    });
+  }
+  return engineRegistryPromise;
+}
+
+async function ensureSettingsResolver(): Promise<SettingsResolver> {
+  if (!settingsResolver) {
+    const registry = await getEngineRegistry();
+    settingsResolver = createSettingsResolver(registry);
+  }
+  return settingsResolver;
+}
+
+function createSettingsResolver(registry: EngineRegistry): SettingsResolver {
+  return new SettingsResolver(registry, {
+    configPath: options.config,
+    defaultSettings,
+    onDictionaryDefinition: addDictionaryWatcher,
+  });
+}
+
+async function registerWatchers(registry: EngineRegistry): Promise<void> {
   const watchers: FileSystemWatcher[] = [
     { globPattern: '**/cspell.{json,yaml,yml}' },
     { globPattern: '**/.cspell.json' },
@@ -126,117 +230,71 @@ connection.onInitialized(async () => {
     let baseUri: string;
     let pattern: string;
     if (path.isAbsolute(options.config)) {
-      baseUri = 'file://' + path.dirname(options.config);
+      baseUri = pathToFileURL(path.dirname(options.config)).href;
       pattern = path.basename(options.config);
     } else {
-      baseUri = 'file://' + process.cwd();
+      baseUri = pathToFileURL(process.cwd()).href;
       pattern = options.config.startsWith('.' + path.sep)
         ? options.config.substring(2)
         : options.config;
     }
     watchers.push({ globPattern: { baseUri, pattern } });
   }
-  const globalConfig = await getGlobalSettingsAsync();
-  // getGlobalSettingsAsync returns with globRoot even if global config doesn't exist
-  if (globalConfig.globRoot && fs.existsSync(globalConfig.globRoot)) {
-    const baseUri = 'file://' + globalConfig.globRoot;
+
+  const globalRoots = new Set<string>();
+  for (const engine of registry.all()) {
+    try {
+      const globalConfig = await engine.lib.getGlobalSettingsAsync();
+      // getGlobalSettingsAsync returns with globRoot even if global config doesn't exist
+      if (globalConfig.globRoot) globalRoots.add(globalConfig.globRoot);
+    } catch (error) {
+      connection.console.warn(
+        `Could not read the global CSpell configuration: ${errorMessage(error)}`,
+      );
+    }
+  }
+  for (const globRoot of globalRoots) {
+    if (!fs.existsSync(globRoot)) continue;
+    const baseUri = pathToFileURL(globRoot).href;
     // https://github.com/streetsidesoftware/cspell/blob/1bee5f5aa4429a1b1ae0e88934b093c5440b44dc/packages/cspell-lib/src/lib/Settings/cfgStore.ts#L15
     watchers.push({ globPattern: { baseUri, pattern: 'cspell.json' } });
   }
+
   // Watch for changes in cspell config files
-  connection.client.register(DidChangeWatchedFilesNotification.type, {
-    watchers,
-  });
-});
-
-connection.onDidChangeWatchedFiles((change) => {
-  connection.console.log(
-    'Configuration file changed. Revalidating all open documents.',
-  );
-  if (
-    change.changes.some((c) =>
-      watchingCustomDictionaries.has(c.uri.substring('file://'.length)),
-    )
-  ) {
-    refreshDictionaryCache(0).then(() => revalidateAllOpenDocuments());
-  } else {
-    revalidateAllOpenDocuments();
-  }
-});
-
-connection.onCodeAction(createOnCodeActionHandler(documents));
-
-// This event is emitted when the text document first opened or when its content has changed.
-documents.onDidChangeContent((change) => {
-  validateTextDocument(change.document);
-});
-
-async function validateTextDocument(textDocument: TextDocument): Promise<void> {
-  const settings = await getSettingsForDocument(textDocument);
-  connection.sendDiagnostics({
-    uri: textDocument.uri,
-    diagnostics: await Validator.validateTextDocument(textDocument, settings),
-  });
-}
-
-function revalidateAllOpenDocuments() {
-  settingsCache.clear();
-  getDefaultConfigLoader().clearCachedSettingsFiles();
-  for (const doc of documents.all()) {
-    validateTextDocument(doc);
-  }
-}
-
-const settingsCache: Map<string, CSpellSettings> = new Map();
-
-export async function getSettingsForDocument(textDocument: TextDocument) {
-  const cached = settingsCache.get(textDocument.uri);
-  if (cached) {
-    return cached;
-  }
-  const docPath = textDocument.uri.startsWith('file:')
-    ? fileURLToPath(textDocument.uri)
-    : undefined;
-  let config;
-  if (options.config) {
-    try {
-      config = await readSettings(options.config);
-    } catch {
-      // The config file might not exist.
-      config = undefined;
-    }
-  } else {
-    const configLoader = getDefaultConfigLoader();
-    config = docPath ? await configLoader.searchForConfig(docPath) : undefined;
-  }
-
-  const settings = mergeSettings(
-    await getDefaultSettings(),
-    await getGlobalSettingsAsync(),
-    defaultSettings,
-    config || {},
-  );
-  const documentSettings = constructSettingsForText(
-    settings,
-    undefined,
-    textDocument.languageId,
-  );
-
-  // Add new custom dictionaries to watchers
-  for (const dict of documentSettings.dictionaryDefinitions ?? []) {
-    if (!('path' in dict) || !dict.path) continue;
-    if (!('addWords' in dict) || !dict.addWords) continue;
-    if (watchingCustomDictionaries.has(dict.path)) continue;
-    const baseUri = 'file://' + path.dirname(dict.path);
-    const pattern = path.basename(dict.path);
-    connection.client.register(DidChangeWatchedFilesNotification.type, {
-      watchers: [{ globPattern: { baseUri, pattern } }],
+  try {
+    await connection.client.register(DidChangeWatchedFilesNotification.type, {
+      watchers,
     });
-    watchingCustomDictionaries.add(dict.path);
+  } catch (error) {
+    connection.console.warn(
+      `Could not register CSpell configuration watchers: ${errorMessage(error)}`,
+    );
   }
+}
 
-  settingsCache.set(textDocument.uri, documentSettings);
-  return documentSettings;
+function addDictionaryWatcher(dictionaryPath: string): void {
+  if (watchingCustomDictionaries.has(dictionaryPath)) return;
+
+  const baseUri = pathToFileURL(path.dirname(dictionaryPath)).href;
+  const pattern = path.basename(dictionaryPath);
+  watchingCustomDictionaries.add(dictionaryPath);
+  void connection.client
+    .register(DidChangeWatchedFilesNotification.type, {
+      watchers: [{ globPattern: { baseUri, pattern } }],
+    })
+    .catch((error) => {
+      watchingCustomDictionaries.delete(dictionaryPath);
+      connection.console.error(
+        `Failed to watch custom dictionary ${dictionaryPath}: ${errorMessage(error)}`,
+      );
+    });
+}
+
+function isWatchingDictionary(uri: string): boolean {
+  const dictionaryPath = safeFileURLToPath(uri);
+  return dictionaryPath
+    ? watchingCustomDictionaries.has(dictionaryPath)
+    : false;
 }
 
 connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
@@ -256,6 +314,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     return { error: 'Could not extract the word from the message.' };
   }
 
+  const registry = await getEngineRegistry();
+  const engine = registry.getForDocument(uri);
+
   if (
     command == 'AddToUserWordsConfig' ||
     command == 'AddToWorkspaceWordsConfig'
@@ -263,7 +324,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     const docPath = fileURLToPath(uri);
     let configPath: string | undefined = options.config;
     if (!configPath) {
-      const config = await getDefaultConfigLoader().searchForConfig(docPath);
+      const config = await engine.lib
+        .getDefaultConfigLoader()
+        .searchForConfig(docPath);
       configPath = config?.source?.filename;
     }
 
@@ -282,6 +345,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         }
       }
     } else {
+      const workspaceRoot = registry.rootForDocument(uri) ?? registry.roots[0];
       if (!workspaceRoot) {
         return {
           error:
@@ -289,7 +353,9 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
         };
       }
       configPath = path.join(workspaceRoot, 'cspell.json');
-      currentSettings = defaultSettings;
+      // `defaultSettings` is shared by every workspace folder. Clone the
+      // arrays that adding and sorting mutate before writing a new config.
+      currentSettings = cloneSettingsForConfig(defaultSettings);
     }
 
     if (!configPath.endsWith('.json')) {
@@ -317,7 +383,7 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     // Write to file
     fs.writeFileSync(configPath, stringifyJsonc(currentSettings, null, 2));
 
-    revalidateAllOpenDocuments();
+    await revalidateAllOpenDocuments();
     return { result: `Added "${word}" to the dictionary.` };
   }
   if (command == 'AddToCustomDictionary') {
@@ -325,10 +391,45 @@ connection.onExecuteCommand(async (params: ExecuteCommandParams) => {
     // instead of trying to be clever
     fs.appendFileSync(dictPath, `${word}\n`);
 
-    refreshDictionaryCache(0).then(() => revalidateAllOpenDocuments());
+    try {
+      await (await ensureSettingsResolver()).refreshDictionaries();
+    } catch (error) {
+      connection.console.error(
+        `Failed to refresh CSpell dictionaries: ${errorMessage(error)}`,
+      );
+    }
+    await revalidateAllOpenDocuments();
     return { result: `Added ${word} to ${dictName} dictionary.` };
   }
 });
+
+function collectWorkspaceRoots(params: InitializeParams): string[] {
+  const roots: string[] = [];
+  for (const folder of params.workspaceFolders ?? []) {
+    const root = safeFileURLToPath(folder.uri);
+    if (root) roots.push(path.resolve(root));
+  }
+  if (roots.length === 0 && params.rootUri) {
+    const root = safeFileURLToPath(params.rootUri);
+    if (root) roots.push(path.resolve(root));
+  }
+  if (roots.length === 0 && params.rootPath) {
+    roots.push(path.resolve(params.rootPath));
+  }
+  return [...new Set(roots)];
+}
+
+function safeFileURLToPath(uri: string): string | undefined {
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    return undefined;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 // Make the text document manager listen on the connection
 // for open, change and close text document events

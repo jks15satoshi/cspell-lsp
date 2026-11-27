@@ -9,14 +9,17 @@
     "bun.lock",
     "package-lock.json",
     "dist/**",
-    "node_modules/**"
+    "node_modules/**",
   ],
   "overrides": [
     {
+      // Disable trailing commas for the markdownlint-cli2 JSONC config to
+      // compatible with its JSON schema and leaves markdownlint-cli2's
+      // own parsing unchanged.
       "files": [".markdownlint-cli2.jsonc"],
       "options": {
-        "trailingComma": "none"
-      }
-    }
-  ]
+        "trailingComma": "none",
+      },
+    },
+  ],
 }

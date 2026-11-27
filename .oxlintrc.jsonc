@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "jsdoc"],
+  "jsPlugins": ["eslint-plugin-tsdoc"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+  },
+  "rules": {
+    "jsdoc/check-property-names": "off",
+    "jsdoc/check-tag-names": "off",
+    "jsdoc/empty-tags": "error",
+    "jsdoc/implements-on-classes": "off",
+    "jsdoc/no-blank-blocks": "error",
+    "jsdoc/no-defaults": "off",
+    "jsdoc/require-param-description": "error",
+    "jsdoc/require-property": "off",
+    "jsdoc/require-property-description": "off",
+    "jsdoc/require-property-name": "off",
+    "jsdoc/require-property-type": "off",
+    "jsdoc/require-returns-description": "error",
+    "jsdoc/require-throws-description": "error",
+    "jsdoc/require-yields": "off",
+    "no-var": "error",
+    "tsdoc/syntax": "error",
+    "typescript/no-explicit-any": "warn",
+  },
+  "env": {
+    "node": true,
+    "builtin": true,
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", "build/**"],
+}
