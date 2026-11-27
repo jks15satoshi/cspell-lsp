@@ -12,6 +12,7 @@ import {
   cleanupTempDirs,
   createTempDir,
   nestedCSpellLibPath,
+  writeConditionalCSpellLib,
   writeFakeCSpell,
   writeFakeCSpellLib,
 } from './helpers/workspace.js';
@@ -39,6 +40,106 @@ async function createRegistry(
   });
   return { registry, logs };
 }
+
+describe('bundled engine version', () => {
+  test('resolves the installed version when it is not build-defined', () => {
+    expect(getBundledVersion()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+});
+
+function writeConditionalPackage(
+  root: string,
+  exportsField: Record<string, unknown>,
+  entries: readonly { file: string; marker: string }[],
+): string {
+  const packageDirectory = path.join(root, 'node_modules', 'cspell-lib');
+  writeConditionalCSpellLib(packageDirectory, exportsField, entries);
+  return packageDirectory;
+}
+
+describe('EngineRegistry conditional exports', () => {
+  test('matches conditions in declaration order (node before import)', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(
+      root,
+      { node: './node.js', import: './generic.js' },
+      [
+        { file: './node.js', marker: 'node' },
+        { file: './generic.js', marker: 'generic' },
+      ],
+    );
+
+    const { registry } = await createRegistry([root]);
+    expect(engineMarker(registry, documentUri(root))).toBe('node');
+  });
+
+  test('matches default at its declared position', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(
+      root,
+      { default: './default.js', import: './esm.js' },
+      [
+        { file: './default.js', marker: 'default' },
+        { file: './esm.js', marker: 'import' },
+      ],
+    );
+
+    const { registry } = await createRegistry([root]);
+    expect(engineMarker(registry, documentUri(root))).toBe('default');
+  });
+
+  test('does not prefer node when import is declared first', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(root, { import: './esm.js', node: './node.js' }, [
+      { file: './esm.js', marker: 'import' },
+      { file: './node.js', marker: 'node' },
+    ]);
+
+    const { registry } = await createRegistry([root]);
+    expect(engineMarker(registry, documentUri(root))).toBe('import');
+  });
+
+  test('applies the same order to an explicit package directory', async () => {
+    const root = createTempDir();
+    const packageDirectory = writeConditionalPackage(
+      root,
+      { node: './node.js', import: './generic.js' },
+      [
+        { file: './node.js', marker: 'node' },
+        { file: './generic.js', marker: 'generic' },
+      ],
+    );
+
+    const { registry } = await createRegistry([root], packageDirectory);
+    expect(engineMarker(registry, documentUri(root))).toBe('node');
+  });
+
+  test('falls back when only a require condition is exported', async () => {
+    const root = createTempDir();
+    writeConditionalPackage(root, { require: './cjs.js' }, [
+      { file: './cjs.js', marker: 'require' },
+    ]);
+
+    const { registry } = await createRegistry([root]);
+    const engine = registry.getForDocument(documentUri(root));
+
+    expect(engine.packagePath).toBe('<bundled>');
+    expect(engine.fallbackReason).toContain('no resolvable entry point');
+  });
+
+  test('rejects an explicit package with only a require condition', async () => {
+    const root = createTempDir();
+    const packageDirectory = writeConditionalPackage(
+      root,
+      { require: './cjs.js' },
+      [{ file: './cjs.js', marker: 'require' }],
+    );
+
+    await expect(createRegistry([root], packageDirectory)).rejects.toThrow(
+      'no resolvable entry point',
+    );
+  });
+});
 
 describe('EngineRegistry auto mode', () => {
   test('prefers the cspell-lib used by the workspace cspell package', async () => {

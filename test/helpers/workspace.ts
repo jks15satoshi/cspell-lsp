@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -7,6 +8,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const temporaryDirectories: string[] = [];
 
@@ -57,6 +59,15 @@ const fakeExports: Record<string, string> = {
   CompoundWordsMethod: `export const CompoundWordsMethod = { NONE: 0 };`,
 };
 
+function createFakeExportsSource(
+  missing: ReadonlySet<string> = new Set(),
+): string {
+  return Object.entries(fakeExports)
+    .filter(([name]) => !missing.has(name))
+    .map(([, source]) => source)
+    .join('\n');
+}
+
 export interface FakeCSpellLibOptions {
   version?: string;
   marker?: string;
@@ -98,13 +109,53 @@ export function writeFakeCSpellLib(
   }
 
   const missing = new Set(options.missingExports ?? []);
-  const exports = Object.entries(fakeExports)
-    .filter(([name]) => !missing.has(name))
-    .map(([, source]) => source)
-    .join('\n');
+  const exports = createFakeExportsSource(missing);
   const marker = JSON.stringify(options.marker ?? 'fake');
   writeFileSync(entry, `${exports}\nexport const marker = ${marker};\n`);
   return entry;
+}
+
+export interface ConditionalCSpellLibEntry {
+  /** Path relative to the package directory. */
+  file: string;
+  marker: string;
+}
+
+export interface ConditionalCSpellLibOptions {
+  version?: string;
+}
+
+/**
+ * Writes a cspell-lib-shaped package whose root export uses the given
+ * conditional-export object. Each entry exports its own marker so tests can
+ * observe which target the engine selected.
+ */
+export function writeConditionalCSpellLib(
+  packageDirectory: string,
+  exportsField: Record<string, unknown>,
+  entries: readonly ConditionalCSpellLibEntry[],
+  options: ConditionalCSpellLibOptions = {},
+): void {
+  mkdirSync(packageDirectory, { recursive: true });
+  writeFileSync(
+    path.join(packageDirectory, 'package.json'),
+    JSON.stringify({
+      name: 'cspell-lib',
+      version: options.version ?? '9.0.0',
+      type: 'module',
+      exports: { '.': exportsField },
+    }),
+  );
+
+  const exportsSource = createFakeExportsSource();
+  for (const { file, marker } of entries) {
+    const entry = path.join(packageDirectory, file);
+    mkdirSync(path.dirname(entry), { recursive: true });
+    writeFileSync(
+      entry,
+      `${exportsSource}\nexport const marker = ${JSON.stringify(marker)};\n`,
+    );
+  }
 }
 
 export function writeFakeCSpell(
@@ -134,6 +185,28 @@ export interface RealCSpellLibOptions {
   marker?: string;
 }
 
+function readCSpellLibPackageJsonFromEntry(entry: string): {
+  version?: string;
+} {
+  let directory = path.dirname(fileURLToPath(entry));
+  for (;;) {
+    const candidate = path.join(directory, 'package.json');
+    if (existsSync(candidate)) {
+      const packageJson = JSON.parse(readFileSync(candidate, 'utf8')) as {
+        name?: string;
+        version?: string;
+      };
+      if (packageJson.name === 'cspell-lib') return packageJson;
+    }
+
+    const parent = path.dirname(directory);
+    if (parent === directory) {
+      throw new Error(`Could not find cspell-lib package.json from ${entry}`);
+    }
+    directory = parent;
+  }
+}
+
 /**
  * Creates a workspace-local cspell-lib that re-exports the installed
  * implementation. This exercises real package loading without requiring a
@@ -144,12 +217,7 @@ export function writeRealCSpellLib(
   options: RealCSpellLibOptions = {},
 ): string {
   const realEntry = import.meta.resolve('cspell-lib');
-  const packageJson = JSON.parse(
-    readFileSync(
-      new URL('../../node_modules/cspell-lib/package.json', import.meta.url),
-      'utf8',
-    ),
-  ) as { version?: string };
+  const packageJson = readCSpellLibPackageJsonFromEntry(realEntry);
 
   mkdirSync(packageDirectory, { recursive: true });
   writeFileSync(

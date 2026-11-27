@@ -69,8 +69,10 @@ let cachedBundledVersion: string | undefined;
 /**
  * Returns the version of the cspell-lib bundled into this server.
  *
- * The build injects the version because the published package does not ship
- * cspell-lib's package.json.
+ * The build injects the version because the published bundle does not include
+ * cspell-lib's package.json. Unbundled runs resolve the installed package
+ * through ESM resolution, which also supports dependencies hoisted into an
+ * ancestor node_modules.
  */
 export function getBundledVersion(): string {
   if (cachedBundledVersion) return cachedBundledVersion;
@@ -78,17 +80,8 @@ export function getBundledVersion(): string {
     cachedBundledVersion = CSPELL_LIB_VERSION;
     return cachedBundledVersion;
   }
-  try {
-    const packageJson = JSON.parse(
-      fs.readFileSync(
-        new URL('../node_modules/cspell-lib/package.json', import.meta.url),
-        'utf8',
-      ),
-    ) as PackageJson;
-    cachedBundledVersion = packageJson.version ?? 'unknown';
-  } catch {
-    cachedBundledVersion = 'unknown';
-  }
+  const packageInfo = resolveInstalledPackageInfo('cspell-lib');
+  cachedBundledVersion = packageInfo?.json.version ?? 'unknown';
   return cachedBundledVersion;
 }
 
@@ -468,11 +461,63 @@ function readPackageInfo(directory: string): PackageInfo | undefined {
   }
 }
 
+/**
+ * Resolves an installed package and its metadata through the runtime's ESM
+ * resolver. This follows the same lookup the bundler uses and supports
+ * dependencies installed in an ancestor node_modules.
+ */
+function resolveInstalledPackageInfo(name: string): PackageInfo | undefined {
+  try {
+    let directory = path.dirname(fileURLToPath(import.meta.resolve(name)));
+    for (;;) {
+      const packageInfo = readPackageInfo(directory);
+      if (packageInfo?.json.name === name) return packageInfo;
+
+      const parent = path.dirname(directory);
+      if (parent === directory) return undefined;
+      directory = parent;
+    }
+  } catch {
+    // The bundled version is build-defined; this fallback is best-effort for
+    // unbundled runs and must not prevent the server from starting.
+    return undefined;
+  }
+}
+
+let cachedImportConditions: ReadonlySet<string> | undefined;
+
+/**
+ * Conditions Node activates when resolving dynamic `import()`.
+ *
+ * `default` is handled separately because it matches at its declared position.
+ * Custom `--conditions` are not modeled; engine packages only need the
+ * standard Node conditions.
+ */
+function getImportConditions(): ReadonlySet<string> {
+  if (cachedImportConditions) return cachedImportConditions;
+  const conditions = new Set(['node', 'import']);
+  if (process.features.require_module) {
+    conditions.add('module-sync');
+  }
+  if (!hasNoAddonsFlag()) {
+    conditions.add('node-addons');
+  }
+  cachedImportConditions = conditions;
+  return cachedImportConditions;
+}
+
+function hasNoAddonsFlag(): boolean {
+  if (process.execArgv.includes('--no-addons')) return true;
+  const nodeOptions = process.env.NODE_OPTIONS;
+  return nodeOptions ? /(?:^|\s)--no-addons(?:\s|$)/.test(nodeOptions) : false;
+}
+
 function resolvePackageEntry(packageInfo: PackageInfo): string | undefined {
+  const conditions = getImportConditions();
   const exportTarget =
     packageInfo.json.exports === undefined
       ? undefined
-      : resolveExportTarget(packageInfo.json.exports);
+      : resolveExportTarget(packageInfo.json.exports, conditions);
   const candidates = [
     exportTarget,
     packageInfo.json.module,
@@ -492,11 +537,14 @@ function resolvePackageEntry(packageInfo: PackageInfo): string | undefined {
   return undefined;
 }
 
-function resolveExportTarget(exportsField: unknown): string | undefined {
+function resolveExportTarget(
+  exportsField: unknown,
+  conditions: ReadonlySet<string>,
+): string | undefined {
   if (typeof exportsField === 'string') return exportsField;
   if (Array.isArray(exportsField)) {
     for (const candidate of exportsField) {
-      const target = selectConditionalTarget(candidate);
+      const target = selectConditionalTarget(candidate, conditions);
       if (target) return target;
     }
     return undefined;
@@ -509,16 +557,26 @@ function resolveExportTarget(exportsField: unknown): string | undefined {
     const rootExport = record['.'];
     return rootExport === undefined
       ? undefined
-      : selectConditionalTarget(rootExport);
+      : selectConditionalTarget(rootExport, conditions);
   }
-  return selectConditionalTarget(record);
+  return selectConditionalTarget(record, conditions);
 }
 
-function selectConditionalTarget(value: unknown): string | undefined {
+/**
+ * Selects an export target using Node's conditional-export rules.
+ *
+ * Conditions are evaluated in declaration order, and `default` matches at its
+ * own position rather than as a lower-priority fallback. A condition whose
+ * nested target resolves to nothing does not end the search.
+ */
+function selectConditionalTarget(
+  value: unknown,
+  conditions: ReadonlySet<string>,
+): string | undefined {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) {
     for (const candidate of value) {
-      const target = selectConditionalTarget(candidate);
+      const target = selectConditionalTarget(candidate, conditions);
       if (target) return target;
     }
     return undefined;
@@ -526,10 +584,10 @@ function selectConditionalTarget(value: unknown): string | undefined {
   if (!value || typeof value !== 'object') return undefined;
 
   const record = value as Record<string, unknown>;
-  for (const condition of ['import', 'node', 'default', 'require']) {
-    if (condition in record) {
-      const target = selectConditionalTarget(record[condition]);
-      if (target) return target;
+  for (const [condition, target] of Object.entries(record)) {
+    if (condition === 'default' || conditions.has(condition)) {
+      const resolved = selectConditionalTarget(target, conditions);
+      if (resolved) return resolved;
     }
   }
   return undefined;

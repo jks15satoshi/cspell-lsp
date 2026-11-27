@@ -4,5 +4,5 @@
   "language": "en",
   "useGitignore": true,
   "dictionaries": ["en_us", "en-gb"],
-  "words": ["lockfiles", "vlabo"]
+  "words": ["lockfiles", "monorepo", "vlabo"]
 }
