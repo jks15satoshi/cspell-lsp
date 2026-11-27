@@ -30,21 +30,23 @@
     "vscode-languageserver-types": "^3.17.5"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.5",
     "@types/node": "^22.10.5",
+    "eslint-plugin-tsdoc": "^0.5.4",
     "oxfmt": "^0.80.0",
     "oxlint": "^1.95.0",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "build": "bun build ./src/main.ts --outfile=dist/cspell-lsp.js --target=node",
+    "build": "bun run scripts/build.mjs",
     "start": "node dist/cspell-lsp.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "bun test",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
     "lint:fix": "oxlint --fix .",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run lint && npm run format:check",
+    "check": "npm run typecheck && npm run lint && npm run format:check && bun test",
     "prepublishOnly": "npm run build"
   },
   "repository": {
