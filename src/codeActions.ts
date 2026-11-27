@@ -85,13 +85,18 @@ export type DocumentContextProvider = (
   doc: TextDocument,
 ) => Promise<CodeActionDocumentContext>;
 
+/** Whether config-edit actions should be offered for a document. */
+export type ConfigEditStateProvider = (doc: TextDocument) => Promise<boolean>;
+
 export function createOnCodeActionHandler(
   documents: TextDocuments<TextDocument>,
   getDocumentContext: DocumentContextProvider,
+  isConfigEditable: ConfigEditStateProvider,
 ): (params: CodeActionParams) => Promise<CodeAction[]> {
   const codeActionHandler = new CodeActionHandler(
     documents,
     getDocumentContext,
+    isConfigEditable,
   );
 
   return (params) => codeActionHandler.handler(params);
@@ -101,6 +106,7 @@ class CodeActionHandler {
   constructor(
     readonly documents: TextDocuments<TextDocument>,
     private readonly getDocumentContext: DocumentContextProvider,
+    private readonly isConfigEditable: ConfigEditStateProvider,
   ) {}
 
   public async handler(params: CodeActionParams): Promise<CodeAction[]> {
@@ -141,26 +147,28 @@ class CodeActionHandler {
       message: diagnostics[0].message,
     };
 
-    actions.push({
-      title: 'Add to user words in config',
-      kind: CodeActionKind.QuickFix,
-      diagnostics: diagnostics,
-      command: {
+    if (await this.canEditConfig(textDocument)) {
+      actions.push({
         title: 'Add to user words in config',
-        command: 'AddToUserWordsConfig',
-        arguments: [arg],
-      },
-    });
-    actions.push({
-      title: 'Add to workspace words in config',
-      kind: CodeActionKind.QuickFix,
-      diagnostics: diagnostics,
-      command: {
+        kind: CodeActionKind.QuickFix,
+        diagnostics: diagnostics,
+        command: {
+          title: 'Add to user words in config',
+          command: 'AddToUserWordsConfig',
+          arguments: [arg],
+        },
+      });
+      actions.push({
         title: 'Add to workspace words in config',
-        command: 'AddToWorkspaceWordsConfig',
-        arguments: [arg],
-      },
-    });
+        kind: CodeActionKind.QuickFix,
+        diagnostics: diagnostics,
+        command: {
+          title: 'Add to workspace words in config',
+          command: 'AddToWorkspaceWordsConfig',
+          arguments: [arg],
+        },
+      });
+    }
 
     const dictionaries = settings.dictionaries ?? [];
     if (
@@ -194,6 +202,15 @@ class CodeActionHandler {
     }
 
     return actions;
+  }
+
+  private async canEditConfig(textDocument: TextDocument): Promise<boolean> {
+    try {
+      return await this.isConfigEditable(textDocument);
+    } catch {
+      // Configuration state that cannot be resolved must not expose an edit.
+      return false;
+    }
   }
 
   private async handlerCSpell(

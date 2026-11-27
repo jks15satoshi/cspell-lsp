@@ -8,7 +8,9 @@ import {
 } from 'bun:test';
 import {
   appendFileSync,
+  chmodSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -17,8 +19,10 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { defaultConfigFilenames } from 'cspell-lib';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
+import { ConfigEditor } from '../src/config.js';
 import type { CSpellEngine } from '../src/engine.js';
 import { EngineRegistry } from '../src/engine.js';
 import { SettingsResolver } from '../src/settings.js';
@@ -81,13 +85,15 @@ function createEngine(): CSpellEngine {
   };
 }
 
-function createResolver(): SettingsResolver {
+function createResolver(
+  options: { configPath?: string } = {},
+): SettingsResolver {
   const engine = createEngine();
   const registry = {
     getForDocument: () => engine,
     all: () => [engine],
   } as unknown as EngineRegistry;
-  return new SettingsResolver(registry);
+  return new SettingsResolver(registry, options);
 }
 
 function createDocument(root: string): TextDocument {
@@ -132,6 +138,161 @@ describe('SettingsResolver with real cspell-lib', () => {
       await validateTextDocument(document, after.settings, cspellLib),
     ).toEqual([]);
   });
+
+  test('revalidates after a supported configuration is deleted', async () => {
+    const root = createTempDir();
+    writeConfig(root, { words: [unknownWord] });
+    const resolver = createResolver();
+    const document = createDocument(root);
+
+    const before = await resolver.getForDocument(document);
+    expect(
+      await validateTextDocument(document, before.settings, cspellLib),
+    ).toEqual([]);
+
+    rmSync(path.join(root, 'cspell.json'));
+    resolver.clear();
+    const after = await resolver.getForDocument(document);
+
+    expect(
+      (await validateTextDocument(document, after.settings, cspellLib)).map(
+        (diagnostic) => diagnostic.message,
+      ),
+    ).toEqual([`"${unknownWord}": Unknown word.`]);
+  });
+
+  const supportsToml = defaultConfigFilenames.includes('cspell.config.toml');
+  const discoveredFormats = [
+    {
+      file: 'cspell.json',
+      content: JSON.stringify(
+        { version: '0.2', words: [unknownWord] },
+        null,
+        2,
+      ),
+    },
+    {
+      file: '.cspell.jsonc',
+      content: `// jsonc config\n${JSON.stringify(
+        { version: '0.2', words: [unknownWord] },
+        null,
+        2,
+      )}`,
+    },
+    {
+      file: 'cspell.config.yaml',
+      content: `version: "0.2"\nwords:\n  - ${unknownWord}\n`,
+    },
+    {
+      file: '.cspell.yml',
+      content: `version: "0.2"\nwords:\n  - ${unknownWord}\n`,
+    },
+    {
+      file: 'package.json',
+      content: JSON.stringify(
+        {
+          name: 'fixture',
+          cspell: { version: '0.2', words: [unknownWord] },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      file: 'cspell.config.mjs',
+      content: `export default { version: '0.2', words: [${JSON.stringify(
+        unknownWord,
+      )}] };\n`,
+    },
+    ...(supportsToml
+      ? [
+          {
+            file: 'cspell.config.toml',
+            content: `version = "0.2"\nwords = ["${unknownWord}"]\n`,
+          },
+        ]
+      : []),
+  ];
+
+  for (const { file, content } of discoveredFormats) {
+    test(`discovers and applies ${file}`, async () => {
+      const root = createTempDir();
+      writeFileSync(path.join(root, file), content);
+      const resolver = createResolver();
+      const document = createDocument(root);
+
+      const { settings, engine } = await resolver.getForDocument(document);
+
+      expect(
+        await validateTextDocument(document, settings, engine.lib),
+      ).toEqual([]);
+    });
+  }
+
+  const explicitFormats = [
+    {
+      file: 'explicit.json',
+      content: JSON.stringify(
+        { version: '0.2', words: [unknownWord] },
+        null,
+        2,
+      ),
+    },
+    {
+      file: 'explicit.jsonc',
+      content: `// jsonc config\n${JSON.stringify(
+        { version: '0.2', words: [unknownWord] },
+        null,
+        2,
+      )}`,
+    },
+    {
+      file: 'explicit.yaml',
+      content: `version: "0.2"\nwords:\n  - ${unknownWord}\n`,
+    },
+    {
+      file: 'package.json',
+      content: JSON.stringify(
+        {
+          name: 'fixture',
+          cspell: { version: '0.2', words: [unknownWord] },
+        },
+        null,
+        2,
+      ),
+    },
+    {
+      file: 'explicit.mjs',
+      content: `export default { version: '0.2', words: [${JSON.stringify(
+        unknownWord,
+      )}] };\n`,
+    },
+    ...(supportsToml
+      ? [
+          {
+            file: 'explicit.toml',
+            content: `version = "0.2"\nwords = ["${unknownWord}"]\n`,
+          },
+        ]
+      : []),
+  ];
+
+  for (const { file, content } of explicitFormats) {
+    test(`uses --config with ${file}`, async () => {
+      const root = createTempDir();
+      writeConfig(root, {});
+      const configPath = path.join(root, file);
+      writeFileSync(configPath, content);
+      const resolver = createResolver({ configPath });
+      const document = createDocument(root);
+
+      const { settings, engine } = await resolver.getForDocument(document);
+
+      expect(
+        await validateTextDocument(document, settings, engine.lib),
+      ).toEqual([]);
+    });
+  }
 
   test('loads and uses a real workspace-local cspell-lib', async () => {
     const root = createTempDir();
@@ -199,4 +360,71 @@ describe('SettingsResolver with real cspell-lib', () => {
       [],
     );
   });
+
+  const canTestReadOnlyFile =
+    process.platform !== 'win32' && process.getuid?.() !== 0;
+
+  test.skipIf(!canTestReadOnlyFile)(
+    'does not keep a failed word addition in cached settings',
+    async () => {
+      const root = createTempDir();
+      const configPath = path.join(root, 'cspell.json');
+      const configWord = `zz${Math.random()
+        .toString(36)
+        .replace(/[^a-z]/g, '')
+        .padEnd(8, 'q')
+        .slice(0, 8)}`;
+      const missingWord = `zz${Math.random()
+        .toString(36)
+        .replace(/[^a-z]/g, '')
+        .padEnd(8, 'w')
+        .slice(0, 8)}`;
+      writeConfig(root, { words: [configWord] });
+
+      const engine = createEngine();
+      const registry = {
+        getForDocument: () => engine,
+        all: () => [engine],
+      } as unknown as EngineRegistry;
+      const resolver = new SettingsResolver(registry);
+      const editor = new ConfigEditor({
+        engineForDocument: () => engine,
+        workspaceRootForDocument: () => root,
+      });
+      const document = TextDocument.create(
+        pathToFileURL(path.join(root, 'fixture.md')).href,
+        'markdown',
+        1,
+        `${configWord} ${missingWord}`,
+      );
+
+      const before = await resolver.getForDocument(document);
+      expect(
+        (await validateTextDocument(document, before.settings, cspellLib)).map(
+          (diagnostic) => diagnostic.message,
+        ),
+      ).toEqual([`"${missingWord}": Unknown word.`]);
+
+      chmodSync(configPath, 0o444);
+      try {
+        await expect(
+          editor.addWord(document.uri, 'words', missingWord),
+        ).rejects.toThrow('Could not update');
+        expect(
+          (JSON.parse(readFileSync(configPath, 'utf8')) as { words: string[] })
+            .words,
+        ).toEqual([configWord]);
+
+        const after = await resolver.getForDocument(document);
+        expect(after.settings.words).toEqual([configWord]);
+        expect(
+          (await validateTextDocument(document, after.settings, cspellLib)).map(
+            (diagnostic) => diagnostic.message,
+          ),
+        ).toEqual([`"${missingWord}": Unknown word.`]);
+      } finally {
+        chmodSync(configPath, 0o644);
+      }
+    },
+  );
 });
