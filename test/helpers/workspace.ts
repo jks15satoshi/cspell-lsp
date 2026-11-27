@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 
@@ -122,6 +128,47 @@ export function writeFakeCSpell(
     `export const name = 'cspell';\n`,
   );
   return packageDirectory;
+}
+
+export interface RealCSpellLibOptions {
+  marker?: string;
+}
+
+/**
+ * Creates a workspace-local cspell-lib that re-exports the installed
+ * implementation. This exercises real package loading without requiring a
+ * second installed CSpell version.
+ */
+export function writeRealCSpellLib(
+  packageDirectory: string,
+  options: RealCSpellLibOptions = {},
+): string {
+  const realEntry = import.meta.resolve('cspell-lib');
+  const packageJson = JSON.parse(
+    readFileSync(
+      new URL('../../node_modules/cspell-lib/package.json', import.meta.url),
+      'utf8',
+    ),
+  ) as { version?: string };
+
+  mkdirSync(packageDirectory, { recursive: true });
+  writeFileSync(
+    path.join(packageDirectory, 'package.json'),
+    JSON.stringify({
+      name: 'cspell-lib',
+      version: packageJson.version ?? '0.0.0',
+      type: 'module',
+      exports: { '.': { import: './index.js' } },
+    }),
+  );
+
+  const entry = path.join(packageDirectory, 'index.js');
+  const marker = options.marker ?? 'real-local';
+  writeFileSync(
+    entry,
+    `export * from ${JSON.stringify(realEntry)};\nexport const marker = ${JSON.stringify(marker)};\n`,
+  );
+  return entry;
 }
 
 export function nestedCSpellLibPath(cspellPackageDirectory: string): string {

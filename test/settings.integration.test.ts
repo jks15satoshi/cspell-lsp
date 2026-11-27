@@ -6,17 +6,28 @@ import {
   expect,
   test,
 } from 'bun:test';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
-import type { CSpellEngine, EngineRegistry } from '../src/engine.js';
+import type { CSpellEngine } from '../src/engine.js';
+import { EngineRegistry } from '../src/engine.js';
 import { SettingsResolver } from '../src/settings.js';
 import { validateTextDocument } from '../src/validator.js';
-import { cleanupTempDirs, createTempDir } from './helpers/workspace.js';
+import {
+  cleanupTempDirs,
+  createTempDir,
+  writeRealCSpellLib,
+} from './helpers/workspace.js';
 
 const unknownWord = `zz${Math.random()
   .toString(36)
@@ -119,6 +130,45 @@ describe('SettingsResolver with real cspell-lib', () => {
 
     expect(
       await validateTextDocument(document, after.settings, cspellLib),
+    ).toEqual([]);
+  });
+
+  test('loads and uses a real workspace-local cspell-lib', async () => {
+    const root = createTempDir();
+    const localPackage = path.join(root, 'node_modules', 'cspell-lib');
+    writeConfig(root, {});
+    writeRealCSpellLib(localPackage, { marker: 'real-local' });
+
+    const logs: string[] = [];
+    const registry = await EngineRegistry.create({
+      roots: [root],
+      log: (message) => logs.push(message),
+    });
+    const resolver = new SettingsResolver(registry);
+    const document = createDocument(root);
+    const { engine, settings } = await resolver.getForDocument(document);
+
+    expect(engine.mode).toBe('auto');
+    expect(engine.packagePath).toBe(realpathSync(localPackage));
+    expect(engine.fallbackReason).toBeUndefined();
+    expect((engine.lib as unknown as { marker?: string }).marker).toBe(
+      'real-local',
+    );
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain(`path=${engine.packagePath}`);
+
+    expect(
+      (await validateTextDocument(document, settings, engine.lib)).map(
+        (diagnostic) => diagnostic.message,
+      ),
+    ).toEqual([`"${unknownWord}": Unknown word.`]);
+
+    writeConfig(root, { words: [unknownWord] });
+    resolver.clear();
+    const reloaded = await resolver.getForDocument(document);
+
+    expect(
+      await validateTextDocument(document, reloaded.settings, engine.lib),
     ).toEqual([]);
   });
 
