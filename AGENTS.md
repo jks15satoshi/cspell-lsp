@@ -32,7 +32,7 @@ This file records only conventions that tooling cannot enforce. Do not restate r
 ## Documentation
 
 - Write `README.md` and code comments in English.
-- Mark package-internal exports with `@internal` and deprecated APIs with `@deprecated` plus the replacement.
+- Mark deprecated APIs with `@deprecated` plus the replacement.
 - Commands, arguments, and behavior in the docs must match reality; update `README.md` when behavior changes.
 - When cspell flags a new proper noun, add it to `words` in `.cspell.json`; do not disable dictionaries or checks.
 
