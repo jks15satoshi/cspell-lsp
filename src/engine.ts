@@ -1,8 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { domainToASCII, fileURLToPath, pathToFileURL } from 'url';
 
+import { normalizeGlobPatterns } from 'cspell-glob';
 import * as bundledCSpellLib from 'cspell-lib';
+import type { Glob } from 'cspell-lib';
+import { URI } from 'vscode-uri';
 
 export type CSpellLib = typeof import('cspell-lib');
 
@@ -207,14 +210,40 @@ export class EngineRegistry {
     uri: string,
     useAlias: boolean,
   ): string | undefined {
-    if (!uri.startsWith('file:')) return undefined;
-    let filePath: string;
-    try {
-      filePath = fileURLToPath(uri);
-    } catch {
-      return undefined;
+    if (uri.startsWith('file:')) {
+      let filePath: string;
+      try {
+        filePath = fileURLToPath(uri);
+      } catch {
+        return undefined;
+      }
+      return this.findOwningRoot(filePath, useAlias);
     }
-    return this.findOwningRoot(filePath, useAlias);
+
+    // Virtual documents are matched by the path in their URI. Only alias
+    // resolution uses this path; engine selection keeps using real files.
+    if (!useAlias) return undefined;
+    const uriPath = getDocumentUriPath(uri);
+    if (!uriPath) return undefined;
+    if (!this.sharesWorkspaceServer(uriPath)) return undefined;
+    return this.findOwningRoot(uriPath, true);
+  }
+
+  /**
+   * Guards virtual UNC paths against probing hosts no workspace uses.
+   *
+   * On Windows a non-file URI authority names a UNC host. Resolving a path
+   * whose host no workspace alias names would query the network on every
+   * validation, so only matching hosts reach the real-path fallback. Non-UNC
+   * paths are always allowed.
+   */
+  private sharesWorkspaceServer(filePath: string): boolean {
+    if (path.sep !== '\\') return true;
+    const server = getUncServer(filePath);
+    if (!server) return true;
+    return this.rootEntries.some((entry) =>
+      entry.aliases.some((alias) => getUncServer(alias) === server),
+    );
   }
 
   private findRootEntry(rootPath: string): RootEntry | undefined {
@@ -235,19 +264,39 @@ export class EngineRegistry {
     // A client can address a real workspace through a symlinked path. Fall
     // back to the containing directory's real path only when the URI itself
     // did not match a root, so symlinked subdirectories keep their URI root.
-    const realParent = this.getRealParent(path.dirname(absolute));
+    // Virtual documents can live in deleted directories, so resolve the
+    // deepest existing ancestor and keep the unresolved suffix.
+    const realParent = this.getRealPath(path.dirname(absolute));
     if (!realParent) return undefined;
     const realPath = path.join(realParent, path.basename(absolute));
     const matched = this.matchRoot(realPath, useAlias);
     if (!matched || !useAlias) return matched;
+    return this.aliasRootForPath(absolute, matched);
+  }
 
-    // Keep the alias prefix from the document URI. The real parent only shows
-    // that both paths address the same workspace; rootless ignore globs still
-    // have to be anchored where the client opened the document.
-    const suffix = path.sep + path.relative(matched, realPath);
-    return absolute.endsWith(suffix)
-      ? absolute.slice(0, -suffix.length)
-      : matched;
+  /**
+   * Finds the document URI prefix that maps to the matched workspace root.
+   *
+   * Resolving the document's parent can change path segments after the
+   * workspace prefix, so a suffix comparison is not enough. Walk the logical
+   * ancestors and return the deepest one whose real path is the matched root.
+   * Missing trailing segments are kept, so a deleted workspace root still maps
+   * through the alias the document is addressed by. If the URI and workspace
+   * only meet through a nested symlink, the filesystem root is the closest
+   * URI-compatible anchor.
+   */
+  private aliasRootForPath(absolute: string, matched: string): string {
+    const matchedReal = this.getRealPath(matched) ?? matched;
+    for (
+      let candidate = path.dirname(absolute);
+      ;
+      candidate = path.dirname(candidate)
+    ) {
+      if (this.getRealPath(candidate) === matchedReal) return candidate;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) break;
+    }
+    return path.parse(absolute).root;
   }
 
   private matchRoot(filePath: string, useAlias: boolean): string | undefined {
@@ -268,17 +317,20 @@ export class EngineRegistry {
     return best?.root;
   }
 
+  private getRealPath(directory: string): string | undefined {
+    return getRealPathWithMissingSuffix(directory, (candidate) =>
+      this.getRealParent(candidate),
+    );
+  }
+
   private getRealParent(parent: string): string | undefined {
     const cached = this.realParentCache.get(parent);
     if (cached) return cached;
-    try {
-      const realParent = fs.realpathSync(parent);
+    const realParent = tryRealpath(parent);
+    if (realParent) {
       this.realParentCache.set(parent, realParent);
-      return realParent;
-    } catch {
-      // A directory that does not exist can be retried after it is created.
-      return undefined;
     }
+    return realParent;
   }
 
   /** Distinct engines used by the registry, for cache invalidation. */
@@ -301,15 +353,46 @@ function uniqueRoots(roots: readonly string[]): string[] {
   return [...new Set(roots.map((root) => path.resolve(root)))];
 }
 
+/**
+ * Resolves a directory to its real path, tolerating missing trailing
+ * segments. Walks to the nearest existing ancestor and reattaches the
+ * unresolved suffix, so documents in deleted directories still map to a
+ * workspace reached through a symlink.
+ */
+function getRealPathWithMissingSuffix(
+  directory: string,
+  resolveExisting: (candidate: string) => string | undefined,
+): string | undefined {
+  const missing: string[] = [];
+  for (let current = directory; ;) {
+    const real = resolveExisting(current);
+    if (real) {
+      return missing.reduceRight(
+        (resolved, segment) => path.join(resolved, segment),
+        real,
+      );
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    missing.push(path.basename(current));
+    current = parent;
+  }
+}
+
+/** Returns the real path of a target, or undefined when it cannot resolve. */
+function tryRealpath(target: string): string | undefined {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
 function getRootAliases(root: string): string[] {
   const logical = path.resolve(root);
   const aliases = [logical];
-  try {
-    const realPath = fs.realpathSync(logical);
-    if (realPath !== logical) aliases.push(realPath);
-  } catch {
-    // A root that does not exist yet is still matchable by its logical path.
-  }
+  const realPath = getRealPathWithMissingSuffix(logical, tryRealpath);
+  if (realPath && realPath !== logical) aliases.push(realPath);
   return aliases;
 }
 
@@ -766,6 +849,152 @@ function selectConditionalTarget(
     }
   }
   return NO_EXPORT_MATCH;
+}
+
+/**
+ * Converts a non-file document URI to the path used by workspace matching.
+ *
+ * The path must stay virtual, so this does not resolve symlinks. Parsing with
+ * `vscode-uri` matches cspell-lib's URI decoding, including encoded separators
+ * such as `%2F`. POSIX must keep the decoded `uri.path` because `fsPath`
+ * rewrites paths such as `/c:/work`; on Windows an authority names a UNC host
+ * (`git://server/share/a` is `\\server\share\a`, not a current-drive path).
+ *
+ * The `platform` parameter exists for platform-independent tests.
+ */
+export function getDocumentUriPath(
+  uri: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  let parsed: URI;
+  try {
+    parsed = URI.parse(uri);
+  } catch {
+    return undefined;
+  }
+
+  if (platform !== 'win32') {
+    return path.posix.isAbsolute(parsed.path) ? parsed.path : undefined;
+  }
+
+  const drivePath = parsed.path.replace(/^\/(?=[a-zA-Z]:)/, '');
+  const nativePath = parsed.authority
+    ? `\\\\${parsed.authority}${parsed.path}`.replace(/\//g, '\\')
+    : drivePath.replace(/\//g, '\\');
+  return path.win32.isAbsolute(nativePath) ? nativePath : undefined;
+}
+
+/**
+ * Returns the value cspell-lib's ignore matcher should test.
+ *
+ * cspell-lib reduces non-file URIs to `uri.path`, which drops the authority
+ * that names a UNC host on Windows. Passing the full UNC path keeps it
+ * comparable with a UNC workspace root instead of resolving it against the
+ * server process's current drive. cspell-glob still drops the host when it
+ * makes the path relative to a glob root, so rooted globs from another server
+ * must be removed by {@link getApplicableExclusionGlobs} first.
+ *
+ * The `platform` parameter exists for platform-independent tests.
+ */
+export function getExclusionTarget(
+  uri: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (
+    platform !== 'win32' ||
+    uri.startsWith('file:') ||
+    uri.startsWith('stdin:')
+  ) {
+    return uri;
+  }
+  const uriPath = getDocumentUriPath(uri, platform);
+  return uriPath?.startsWith('\\\\') ? uriPath : uri;
+}
+
+/**
+ * Returns the ignore globs whose roots can apply to an exclusion target.
+ *
+ * cspell-glob makes a file URL relative to a glob root by comparing only the
+ * pathname, so a glob rooted at `\\server-a\share` also matches
+ * `\\server-b\share`. A rooted glob on another UNC server must not apply.
+ * Roots are normalized first because cspell-glob resolves `${cwd}`, relative
+ * roots, and four-slash UNC file URLs before matching. Global patterns stay
+ * root independent.
+ *
+ * The `platform` and `cwd` parameters exist for platform-independent tests.
+ */
+export function getApplicableExclusionGlobs(
+  globs: readonly Glob[],
+  fallbackRoot: string,
+  target: string,
+  platform: NodeJS.Platform = process.platform,
+  cwd: string = process.cwd(),
+): Glob[] {
+  if (platform !== 'win32') return [...globs];
+  const documentServer = getUncServer(target);
+  if (!documentServer) return [...globs];
+
+  return globs.filter((glob) => {
+    const [normalized] = normalizeGlobPatterns([glob], {
+      root: fallbackRoot,
+      cwd,
+      nested: true,
+      nodePath: path.win32,
+    });
+    if (!normalized || normalized.isGlobalPattern) return true;
+    const rootServer = getUncServer(normalized.root);
+    return !rootServer || rootServer === documentServer;
+  });
+}
+
+function isFileUrl(value: string): boolean {
+  return /^file:/i.test(value);
+}
+
+/**
+ * Canonicalizes a UNC server name for identity comparisons.
+ *
+ * File URLs expose an IDN host as lower-case ASCII, while a native UNC path
+ * keeps the Unicode name the client supplied. Both sides must use the same
+ * representation so the same server is not mistaken for a different one.
+ * Invalid host names keep the previous case-insensitive behavior.
+ */
+function canonicalizeUncServer(server: string): string {
+  return (domainToASCII(server) || server).toLowerCase();
+}
+
+/**
+ * Extracts the host from a Windows UNC path or file URL, if it is one.
+ *
+ * The returned host is canonicalized for comparison: IDN names become ASCII
+ * and ASCII case is folded. The host identifies the network destination, so
+ * only servers named by a workspace alias are allowed to reach the real-path
+ * fallback.
+ */
+function getUncServer(filePath: string): string | undefined {
+  if (isFileUrl(filePath)) {
+    try {
+      const url = new URL(filePath);
+      // Node's URL parser leaves a UNC host in the path for file:////host URLs.
+      const fixed = url.href.startsWith('file:////')
+        ? new URL(url.href.replace(/^file:\/{4}/, 'file://'))
+        : url;
+      return fixed.hostname ? canonicalizeUncServer(fixed.hostname) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(filePath)) return undefined;
+
+  const normalized = filePath.replace(/\//g, '\\');
+  const unc = normalized.startsWith('\\\\?\\UNC\\')
+    ? `\\\\${normalized.slice(8)}`
+    : normalized;
+  if (unc.startsWith('\\\\?\\')) return undefined;
+  const root = path.win32.parse(unc).root;
+  if (!root.startsWith('\\\\')) return undefined;
+  const [server] = root.split(path.win32.sep).filter(Boolean);
+  return server ? canonicalizeUncServer(server) : undefined;
 }
 
 function isPathInside(filePath: string, root: string): boolean {

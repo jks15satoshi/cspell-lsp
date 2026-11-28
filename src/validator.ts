@@ -3,7 +3,11 @@ import type { TextDocument } from 'vscode-languageserver-textdocument';
 import type { Diagnostic } from 'vscode-languageserver-types';
 import { DiagnosticSeverity } from 'vscode-languageserver-types';
 
-import type { CSpellLib } from './engine.js';
+import {
+  getApplicableExclusionGlobs,
+  getExclusionTarget,
+  type CSpellLib,
+} from './engine.js';
 
 export type ExtensionId = 'cSpell';
 export const defaultCheckLimit = 1 << 20; // 1MB
@@ -132,6 +136,11 @@ export async function validateTextDocument(
  * Configuration globs already carry the root of the file that defined them;
  * `fallbackRoot` only applies to globs without a root, such as
  * `initializationOptions.defaultSettings`.
+ *
+ * Non-file URIs are matched by their full UNC path on Windows; cspell-lib
+ * would otherwise reduce them to `uri.path` and lose the UNC host. A rooted
+ * glob on another UNC server is dropped before matching because cspell-glob
+ * compares only the pathname when it makes a file URL relative.
  */
 function isDocumentIgnored(
   uri: string,
@@ -147,12 +156,16 @@ function isDocumentIgnored(
   const allowedSchemes = new Set(['file', 'untitled']);
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri)?.[1]?.toLowerCase();
   if (scheme) allowedSchemes.add(scheme);
+  const root = settings.globRoot ?? fallbackRoot ?? process.cwd();
+  const target = getExclusionTarget(uri);
+  const globs = getApplicableExclusionGlobs(ignorePaths, root, target);
+  if (!globs.length) return false;
   const isExcluded = cSpell.ExclusionHelper.generateExclusionFunctionForUri(
-    ignorePaths,
-    settings.globRoot ?? fallbackRoot ?? process.cwd(),
+    globs,
+    root,
     allowedSchemes,
   );
-  return isExcluded(uri);
+  return isExcluded(target);
 }
 
 function haveSuggestionsMatchCase(

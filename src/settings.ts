@@ -31,11 +31,14 @@ interface CacheEntry {
  */
 export class SettingsResolver {
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly defaultSettings: CSpellUserSettings;
 
   constructor(
     private readonly engines: EngineRegistry,
     private readonly options: SettingsResolverOptions = {},
-  ) {}
+  ) {
+    this.defaultSettings = normalizeDefaultIgnorePaths(options.defaultSettings);
+  }
 
   async getForDocument(textDocument: TextDocument): Promise<DocumentSettings> {
     const engine = this.engines.getForDocument(textDocument.uri);
@@ -65,7 +68,7 @@ export class SettingsResolver {
     const settings = engine.lib.mergeSettings(
       await engine.lib.getDefaultSettings(),
       await engine.lib.getGlobalSettingsAsync(),
-      this.options.defaultSettings ?? {},
+      this.defaultSettings,
       config || {},
     );
     const documentSettings = engine.lib.constructSettingsForText(
@@ -102,6 +105,30 @@ export class SettingsResolver {
       this.engines.all().map((engine) => engine.lib.refreshDictionaryCache(0)),
     );
   }
+}
+
+/**
+ * Anchors string `defaultSettings.ignorePaths` to their own `globRoot`.
+ *
+ * cspell-lib normalizes globs from configuration files to `{ glob, root }`
+ * definitions, but `mergeSettings` clears `globRoot`. Initialization defaults
+ * are merged as raw settings, so their root has to be attached before merging.
+ * This mirrors cspell-lib's `toGlobDef`: only string globs receive the root;
+ * object globs keep their own root or fall back to the workspace root.
+ */
+function normalizeDefaultIgnorePaths(
+  settings: CSpellUserSettings | undefined,
+): CSpellUserSettings {
+  if (!settings) return {};
+  const globRoot = settings.globRoot;
+  if (!globRoot || !settings.ignorePaths?.length) return settings;
+
+  return {
+    ...settings,
+    ignorePaths: settings.ignorePaths.map((glob) =>
+      typeof glob === 'string' ? { glob, root: globRoot } : glob,
+    ),
+  };
 }
 
 function safeFileURLToPath(uri: string): string | undefined {
