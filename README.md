@@ -8,7 +8,7 @@ A language server that spell-checks source code with [CSpell](https://cspell.org
 
 The upstream [`vlabo/cspell-lsp`](https://github.com/vlabo/cspell-lsp) has been marked as deprecated in favor of [Codebook](https://github.com/blopker/codebook). In practice, however, I have found that Codebook is not yet a drop-in replacement for CSpell, whether in dictionary coverage or in functionality, so I believe this project still warrants continued maintenance.
 
-Because the upstream project has some known issues and depends on a somewhat older version of cspell-lib, I have chosen to fork it and continue maintaining it here (and, in some ways, almost re-implement it). Given my limited capabilities and time, maintenance of this project will rely heavily on LLM agents.
+Because the upstream project has some known issues and depends on a somewhat older version of `cspell-lib`, I have chosen to fork it and continue maintaining it here (and, in some ways, almost re-implement it). Given my limited capabilities and time, maintenance of this project will rely heavily on LLM agents.
 
 </details>
 <!-- markdownlint-enable MD033 -->
@@ -18,7 +18,7 @@ Because the upstream project has some known issues and depends on a somewhat old
 - **Incremental diagnostics:** Publishes `Information`-severity diagnostics for unknown and forbidden words as documents are opened and changed.
 - **Quick fixes:** Offers case-matched CSpell suggestions and marks preferred suggestions when available.
 - **Engine-derived configuration:** Uses the selected CSpell engine's file names for discovery and watching, with editing support for formats that have a safe writer.
-- **Word management:** Adds words to `userWords`, `words`, or a writable custom dictionary through code actions and workspace commands. Supports JSON, JSONC, YAML/YML, TOML (when supported), and `package.json` configurations.
+- **Word management:** Adds words to `userWords`, `words`, or a writable custom dictionary through code actions and workspace commands. Adding words to a configuration file supports JSON, JSONC, YAML/YML, TOML (when supported by the selected engine), and `package.json`; executable JS/TS configurations remain readable for diagnostics but are read-only.
 - **Automatic revalidation:** Rechecks open documents when a configuration or custom dictionary changes, and after adding a word.
 - **`ignorePaths` support:** Skips files matched by `ignorePaths` from the merged configuration and clears diagnostics when an open file becomes ignored.
 - **Multi-root workspaces:** Resolves settings per document and supports a different workspace-local CSpell engine in each folder.
@@ -28,7 +28,7 @@ Because the upstream project has some known issues and depends on a somewhat old
 ### Requirements
 
 - Node.js 22.18 or newer.
-- CSpell 8.x or newer when using a workspace-installed engine. The bundled engine does not require a local CSpell installation.
+- `cspell` or `cspell-lib` 8.x or newer when using a workspace-installed engine. The bundled engine does not require a local CSpell installation.
 
 ### Installation
 
@@ -40,6 +40,8 @@ cspell-lsp --stdio
 
 #### Global installation
 
+If `@vlabo/cspell-lsp` is already installed, uninstall it first because both packages provide the same `cspell-lsp` binary.
+
 ```bash
 npm install -g @jks15satoshi/cspell-lsp
 ```
@@ -50,7 +52,7 @@ This puts `cspell-lsp` on your `PATH`. Check which binary your editor will find:
 command -v cspell-lsp
 ```
 
-On Windows, use `where cspell-lsp`; it finds `cspell-lsp.cmd`, which runs from `cmd.exe` or PowerShell.
+On Windows, run `where.exe cspell-lsp` in `cmd.exe` or `Get-Command cspell-lsp` in PowerShell (avoid bare `where` in PowerShell, which is an alias for `Where-Object`). `cspell-lsp.cmd` runs only from a shell, so use it only for clients that launch through a shell; see [PATH notes](#path-notes) for shell-less clients.
 
 #### Local installation
 
@@ -79,17 +81,21 @@ npm uninstall -g @vlabo/cspell-lsp
 npm uninstall @vlabo/cspell-lsp
 ```
 
-If both were installed at different times, remove the stale binary or reinstall this package after uninstalling the old one.
+If you installed `@jks15satoshi/cspell-lsp` first, uninstalling `@vlabo/cspell-lsp` afterward may remove the shared `cspell-lsp` binary, so reinstall `@jks15satoshi/cspell-lsp` if needed (or remove any stale binary if a conflict remains).
 
 #### PATH notes
 
-- **Windows:** `cspell-lsp.cmd` is a `cmd.exe` shim, not a native executable. Use it only from a shell. For a shell-less client, run `node` with the package entry, for example `node %AppData%\npm\node_modules\@jks15satoshi\cspell-lsp\dist\cspell-lsp.js --stdio` for a global install, or `node node_modules\@jks15satoshi\cspell-lsp\dist\cspell-lsp.js --stdio` for a local install.
+- **Windows:** `cspell-lsp.cmd` is a `cmd.exe` shim, not a native executable, so use it only for clients that launch commands through a shell. To locate your install path, run `where.exe cspell-lsp` in `cmd.exe` or `Get-Command cspell-lsp` in PowerShell (avoid bare `where` in PowerShell, which is an alias for `Where-Object`), or check `npm root -g`. For a shell-less client, run `node` with an explicit path to `dist\cspell-lsp.js` rather than the `.cmd` shim or Windows environment-variable syntax (shell-less launchers do not expand `%...%` variables)—for example `node C:\Users\<user>\AppData\Roaming\npm\node_modules\@jks15satoshi\cspell-lsp\dist\cspell-lsp.js --stdio` for a global install (matching `npm root -g`), or an explicit project path (or client placeholder) to `node_modules\@jks15satoshi\cspell-lsp\dist\cspell-lsp.js` for a local install.
 - **macOS GUI applications:** applications started from Finder or the Dock usually do not read shell startup files, so they may not see Homebrew or a Node version manager on `PATH`. Use an absolute path such as `/opt/homebrew/bin/cspell-lsp` or `/usr/local/bin/cspell-lsp`, or configure the editor to inherit your shell environment.
 - **Version managers (nvm, fnm, Volta, asdf):** use the shim or tool-specific install path, or point the editor at an absolute path. Installing this package locally in each project is another option.
 
 ### Editor Setup
 
-The sections below cover the common LSP clients. Where a dedicated, widely used CSpell integration exists, it is listed first; the LSP setup shown here is the alternative for users who specifically want this server. The examples assume `cspell-lsp` is on `PATH`. Replace that first command argument with a local or absolute path when needed. They follow each client's current documentation; the editor integrations are not exercised by this repository's tests. CSpell can check any filetype, so add the filetypes you want checked. Most clients use `.git`, `cspell.json`, `.cspell.json`, and `package.json` as workspace root markers.
+The sections below cover common LSP clients. Where a dedicated, widely used CSpell integration exists, it is listed first; the LSP setup shown here is the alternative for users who specifically want this server.
+
+The examples assume `cspell-lsp` is on `PATH`; replace that first command argument with a local or absolute path when needed (see [PATH notes](#path-notes) for Windows and macOS GUI details). The snippets follow each client's current documentation and are not exercised by this repository's tests.
+
+CSpell can check any filetype, so add the filetypes you want checked to your client configuration. Examples that configure workspace root markers use `.git`, `cspell.json`, `.cspell.json`, and `package.json`.
 
 <!-- markdownlint-disable MD033 -->
 <details>
@@ -296,14 +302,14 @@ This language server is an alternative for users who specifically want this serv
 }
 ```
 
-Add VS Code language IDs such as `typescript`, `javascript`, `python`, or `json` to `filetypes` for other filetypes. For a project-local install, set `cmd` to `["node", "${workspaceFolder}/node_modules/@jks15satoshi/cspell-lsp/dist/cspell-lsp.js", "--stdio"]`; keep `cspell-lsp.cmd` only for clients that launch through a shell. Reload the window after changing the setting.
+Add VS Code language IDs such as `typescript`, `javascript`, `python`, or `json` to `filetypes` for other filetypes. Simple LSP Client spawns processes without a shell, so global Windows installs also need the `node` form with the path to `dist/cspell-lsp.js`—for example `["node", "${userHome}/AppData/Roaming/npm/node_modules/@jks15satoshi/cspell-lsp/dist/cspell-lsp.js", "--stdio"]` for the default npm prefix. For a project-local install, set `cmd` to `["node", "${workspaceFolder}/node_modules/@jks15satoshi/cspell-lsp/dist/cspell-lsp.js", "--stdio"]`. Reload the window after changing the setting.
 
 </details>
 
 <details>
 <summary>JetBrains IDEs</summary>
 
-For most users, the preferred option is the mainstream [CSpell Check](https://plugins.jetbrains.com/plugin/20676-cspell-check) plugin. It parses the project's CSpell configuration and syncs custom vocabularies into the IDE dictionary.
+For most users, the preferred option is the dedicated [CSpell Check](https://plugins.jetbrains.com/plugin/20676-cspell-check) plugin. It parses the project's CSpell configuration and syncs custom vocabularies into the IDE dictionary.
 
 This language server is an alternative for users who want its diagnostics and quick fixes. Install the [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij) plugin, then open **Settings > Languages & Frameworks > Language Servers (LSP4IJ)** and click **+**:
 
@@ -316,7 +322,11 @@ This language server is an alternative for users who want its diagnostics and qu
 <details>
 <summary>Zed</summary>
 
-Use the [jks15satoshi/zed-cspell](https://github.com/jks15satoshi/zed-cspell) fork as a dev extension. Clone the fork and check out the version that targets `@jks15satoshi/cspell-lsp`:
+Install the [jks15satoshi/zed-cspell](https://github.com/jks15satoshi/zed-cspell) fork as a dev extension; its `main` branch uses `@jks15satoshi/cspell-lsp`.
+
+Prerequisites: [Rust](https://rustup.rs/) installed via `rustup` (Zed compiles dev extensions with Rust) and Node.js 22.18 or newer (for the extension to install and run the server).
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/jks15satoshi/zed-cspell
@@ -356,7 +366,15 @@ Configuration sources are merged in this order, with later sources taking preced
 3. `initializationOptions.defaultSettings`
 4. project configuration or the file passed with `--config`
 
-Files matching `ignorePaths` are not checked. Patterns from a configuration file are resolved relative to that file's `globRoot` or directory, including patterns declared by imported configurations. String patterns from `initializationOptions.defaultSettings` use its `globRoot` when set. Object patterns keep their own `root`; without one, they use the matching workspace folder. On Windows, a pattern rooted at a UNC path applies only to documents on the same server; patterns beginning with `**` are not tied to a server.
+Clients can pass fallback CSpell settings through `initializationOptions.defaultSettings` during LSP initialization; `workspace/didChangeConfiguration` is not used for settings.
+
+Files matching `ignorePaths` are not checked:
+
+- **Config-file patterns:** resolved relative to the configuration file's `globRoot` or directory.
+- **Imported config roots:** patterns declared by imported configurations are resolved relative to the imported file's `globRoot` or directory.
+- **`initializationOptions.defaultSettings`:** string patterns use its `globRoot` when set, and otherwise fall back to the matching workspace folder.
+- **Object patterns:** keep their own `root`; without one, they use the matching workspace folder.
+- **Windows UNC paths:** a pattern rooted at a UNC path applies only to documents on the same server; patterns beginning with `**` are not tied to a server.
 
 The global configuration is read from `cspell.json` in:
 
@@ -368,44 +386,27 @@ The global configuration is read from `cspell.json` in:
 
 ### Configuration Format Support
 
-The selected engine's `defaultConfigFilenames` determines which files are
-discovered and watched. The table below describes the bundled engine
-(currently cspell-lib 10.x); a workspace engine may support a different set.
+The selected engine's `defaultConfigFilenames` determines which files are discovered and watched. The table below describes the bundled engine (currently `cspell-lib` 10.x); a workspace engine may support a different set.
 
-| Format                                                               | Editing                               | Behavior and limitations                                                                                                                                           |
-| -------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| JSON / JSONC (`cspell.json`, `.cspell.json`, `cspell.jsonc`, ...)    | Yes                                   | JSONC comments and unrelated keys are preserved; whitespace and formatting may be normalized.                                                                      |
-| YAML / YML (`cspell.yaml`, `.cspell.yml`, `cspell.config.yaml`, ...) | Yes                                   | Comment preservation depends on the selected engine's writer: bundled cspell-lib 10 preserves comments, while cspell-lib 8 does not. Formatting may be normalized. |
-| `package.json` with a `cspell` object                                | Yes                                   | Discovered only when the `cspell` object exists. Writes only `cspell.words` and `cspell.userWords`; JSON whitespace may be normalized.                             |
-| TOML (`cspell.config.toml`, `.cspell.config.toml`)                   | When supported by the selected engine | Comments and formatting are rewritten. Number representations may be normalized, but CSpell setting values are preserved.                                          |
-| Executable JS/TS (`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts`)      | No                                    | Read-only; diagnostics still work.                                                                                                                                 |
-| Other formats                                                        | Only with a safe writer               | Read-only when the selected engine has no safe writer.                                                                                                             |
+| Format                                                               | Editing                               | Behavior and limitations                                                                                                                                               |
+| -------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| JSON / JSONC (`cspell.json`, `.cspell.json`, `cspell.jsonc`, ...)    | Yes                                   | JSONC comments and unrelated keys are preserved; whitespace and formatting may be normalized.                                                                          |
+| YAML / YML (`cspell.yaml`, `.cspell.yml`, `cspell.config.yaml`, ...) | Yes                                   | Comment preservation depends on the selected engine's writer: bundled `cspell-lib` 10 preserves comments, while `cspell-lib` 8 does not. Formatting may be normalized. |
+| `package.json` with a `cspell` object                                | Yes                                   | Discovered only when the `cspell` object exists. Writes only `cspell.words` and `cspell.userWords`; JSON whitespace may be normalized.                                 |
+| TOML (`cspell.config.toml`, `.cspell.config.toml`)                   | When supported by the selected engine | Comments and formatting are rewritten. Number representations may be normalized, but CSpell setting values are preserved.                                              |
+| Executable JS/TS (`.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, `.cts`)      | No                                    | Read-only; diagnostics still work.                                                                                                                                     |
+| Other formats                                                        | Only with a safe writer               | Read-only when the selected engine has no safe writer.                                                                                                                 |
 
 Notes:
 
-- Malformed, read-only, remote, and virtual configuration files are never
-  written. Config-edit actions are hidden when a file cannot be edited safely;
-  direct invocation returns an error.
-- Edits are not byte-for-byte: serializers may normalize whitespace and
-  formatting, although existing line endings are restored.
-- A YAML `words` or `userWords` value that is an alias is materialized into a
-  concrete list when that setting is edited; the anchored list is left
-  unchanged. A comment attached to the alias itself is not preserved.
-- Configuration edits are serialized per resolved file path within one server
-  process, so concurrent add-word requests do not overwrite each other, even
-  when the same directory is opened through a symlink alias. External
-  processes are not locked.
-- Clients that do not advertise relative-pattern support receive absolute
-  string watcher globs for configuration and dictionary files. Literal path
-  segments in those globs are escaped for glob syntax.
-- When no project config exists and `--config` is not set, the server creates
-  `cspell.json` at the workspace root.
-- An explicit `--config` file must already exist and be readable; missing,
-  unreadable, or malformed files fail validation with an error instead of
-  silently falling back to default settings.
-- The watcher list includes `package.json` under every workspace folder when
-  the selected engine lists it. Clients that support file-watcher exclusions
-  should exclude `node_modules`.
+- Malformed, read-only, remote, and virtual configuration files are never written. Config-edit actions are hidden when a file cannot be edited safely; calling the workspace command directly returns an error.
+- Edits are not byte-for-byte: serializers may normalize whitespace and formatting, although existing line endings are restored.
+- A YAML `words` or `userWords` value that is an alias is materialized into a concrete list when that setting is edited; the anchored list is left unchanged. A comment attached to the alias itself is not preserved.
+- Configuration edits are serialized per resolved file path within one server process, so concurrent add-word requests do not overwrite each other, even when the same directory is opened through a symlink alias. External processes are not locked.
+- Clients that do not advertise relative-pattern support receive absolute string watcher globs for configuration and dictionary files. Literal path segments in those globs are escaped for glob syntax.
+- When adding a word to `words` or `userWords` and no project config exists (with `--config` unset), the server creates `cspell.json` at the workspace root.
+- An explicit `--config` file must already exist and be readable; missing, unreadable, or malformed files fail validation with an error instead of silently falling back to default settings.
+- The watcher list includes `package.json` under every workspace folder when the selected engine lists it. Clients that support file-watcher exclusions should exclude `node_modules`.
 
 ### Command-Line Arguments
 
@@ -413,7 +414,7 @@ Notes:
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `-c, --config <path>` | Use the given CSpell configuration file instead of searching for one. The file is watched and editable according to its format. |
 | `--sortWords`         | Sort `words` and `userWords` when a word is added.                                                                              |
-| `--stdio`             | Use stdio for communication (the default).                                                                                      |
+| `--stdio`             | Use stdio for communication (required).                                                                                         |
 | `--engine <path>`     | Load the CSpell engine from the given package directory or entry file. Relative paths use cwd.                                  |
 | `--engine bundled`    | Ignore workspace packages and use the engine bundled with this server.                                                          |
 
@@ -425,7 +426,7 @@ By default, the server resolves the CSpell engine for each workspace folder in t
 2. a `cspell-lib` installed directly in the workspace;
 3. the `cspell-lib` bundled with this server.
 
-Local versions must be 8 or newer and expose the API used by the server. The server falls back to the bundled engine when packages are missing, versions are older than 8, imports fail, or the required API is unavailable. For each workspace folder, the startup log records any fallback reason and the selected mode, version, and package path.
+Local `cspell-lib` versions must be 8 or newer and expose the API used by the server. The server falls back to the bundled engine when packages are missing, versions are older than 8, imports fail, or the required API is unavailable. For each workspace folder, the startup log records any fallback reason and the selected mode, version, and package path.
 
 Package directories use Node's ESM `exports` conditions in declaration order. When `exports` is present and not `null`, it is the only entry-point selector; `module`, `main`, and `index.js` are used only when `exports` is absent or `null`. A condition mapped to `null` blocks resolution. A `require`-only entry is not selected; pass the entry file to `--engine` when it is the only supported entry point.
 
@@ -437,9 +438,7 @@ Engines are resolved at startup. Restart the server after changing `cspell`, `cs
 
 - Only the first 1,048,576 characters of a document are checked.
 - Configuration editing is limited by format and engine capabilities; see [Configuration Format Support](#configuration-format-support).
-- Workspace cspell-lib 7.x and earlier are not supported; the server uses the bundled engine instead.
-- Installed engine changes require to restart LSP; `node_modules` is not watched for version changes.
-- Yarn PnP workspaces are not supported and use the bundled engine.
+- Workspace engine resolution has constraints: `cspell-lib` 7.x and earlier and Yarn PnP workspaces fall back to the bundled engine, and `node_modules` is not watched, so installed engine changes require restarting the server; see [CSpell Engine Selection](#cspell-engine-selection).
 
 ## Development
 
@@ -450,10 +449,10 @@ Building requires [Bun](https://bun.sh/); running the server requires Node.js 22
 ```bash
 bun install
 bun run build
-bun run start
+bun run start -- --stdio
 ```
 
-The build writes the server entry to `dist/cspell-lsp.js`; `bun run start` runs it with Node. Runtime packages stay external and are installed by npm, so the package does not embed third-party sources in `dist`. The build resolves `cspell-lib` through module resolution, so dependencies hoisted to an ancestor `node_modules` (for example, in a monorepo) are supported.
+The build writes the server entry to `dist/cspell-lsp.js`; `bun run start -- --stdio` runs that built entry with Node over stdio (`--stdio` is required). Runtime packages stay external and are installed by `bun install` locally or by `npm` when published, so the package does not embed third-party sources in `dist`. The build resolves `cspell-lib` through module resolution, so dependencies hoisted to an ancestor `node_modules` (for example, in a monorepo) are supported.
 
 ### Testing and Checks
 
