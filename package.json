@@ -1,6 +1,6 @@
 {
   "name": "@jks15satoshi/cspell-lsp",
-  "version": "2.0.1-trust.0",
+  "version": "2.0.0",
   "description": "A language server that spell-checks source code with CSpell.",
   "type": "module",
   "bin": {
