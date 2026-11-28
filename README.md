@@ -20,6 +20,7 @@ Because the upstream project has some known issues and depends on a somewhat old
 - **Engine-derived configuration:** Uses the selected CSpell engine's file names for discovery and watching, with editing support for formats that have a safe writer.
 - **Word management:** Adds words to `userWords`, `words`, or a writable custom dictionary through code actions and workspace commands. Supports JSON, JSONC, YAML/YML, TOML (when supported), and `package.json` configurations.
 - **Automatic revalidation:** Rechecks open documents when a configuration or custom dictionary changes, and after adding a word.
+- **`ignorePaths` support:** Skips files matched by `ignorePaths` from the merged configuration and clears diagnostics when an open file becomes ignored.
 - **Multi-root workspaces:** Resolves settings per document and supports a different workspace-local CSpell engine in each folder.
 
 ## Getting Started
@@ -51,6 +52,8 @@ Configuration sources are merged in this order, with later sources taking preced
 2. global CSpell configuration
 3. `initializationOptions.defaultSettings`
 4. project configuration or the file passed with `--config`
+
+Files matching `ignorePaths` are not checked. Patterns from a configuration file are resolved relative to that file's `globRoot` or directory, including patterns declared by imported configurations. String patterns from `initializationOptions.defaultSettings` use its `globRoot` when set. Object patterns keep their own `root`; without one, they use the matching workspace folder. On Windows, a pattern rooted at a UNC path applies only to documents on the same server; patterns beginning with `**` are not tied to a server.
 
 The global configuration is read from `cspell.json` in:
 

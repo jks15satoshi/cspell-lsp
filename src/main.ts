@@ -172,21 +172,30 @@ documents.onDidChangeContent((change) => {
   void validateTextDocument(change.document);
 });
 
+interface DocumentContext extends CodeActionDocumentContext {
+  /** Workspace path alias that matches the document, used to anchor ignore globs. */
+  root?: string;
+}
+
 async function getDocumentContext(
   textDocument: TextDocument,
-): Promise<CodeActionDocumentContext> {
-  return (await ensureSettingsResolver()).getForDocument(textDocument);
+): Promise<DocumentContext> {
+  const resolver = await ensureSettingsResolver();
+  const context = await resolver.getForDocument(textDocument);
+  const registry = await getEngineRegistry();
+  return { ...context, root: registry.rootAliasForDocument(textDocument.uri) };
 }
 
 async function validateTextDocument(textDocument: TextDocument): Promise<void> {
   try {
-    const { engine, settings } = await getDocumentContext(textDocument);
+    const { engine, settings, root } = await getDocumentContext(textDocument);
     connection.sendDiagnostics({
       uri: textDocument.uri,
       diagnostics: await Validator.validateTextDocument(
         textDocument,
         settings,
         engine.lib,
+        root,
       ),
     });
   } catch (error) {
