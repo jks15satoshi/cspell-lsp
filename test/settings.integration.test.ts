@@ -25,9 +25,9 @@ import { defaultConfigFilenames } from 'cspell-lib';
 import type { CSpellSettings } from 'cspell-lib';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
-import { ConfigEditor } from '../src/config.js';
-import type { CSpellEngine, CSpellLib } from '../src/engine.js';
-import { EngineRegistry } from '../src/engine.js';
+import { ConfigEditor } from '../src/config/editor.js';
+import type { CSpellLib } from '../src/engine/package.js';
+import { EngineRegistry, type CSpellEngine } from '../src/engine/registry.js';
 import type { SettingsResolverOptions } from '../src/settings.js';
 import { SettingsResolver } from '../src/settings.js';
 import { validateTextDocument } from '../src/validator.js';

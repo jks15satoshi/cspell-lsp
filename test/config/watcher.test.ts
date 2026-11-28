@@ -3,88 +3,20 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import * as cspellLib from 'cspell-lib';
-import type { ICSpellConfigFile } from 'cspell-lib';
 
 import {
   absoluteWatcherPattern,
-  configReadOnlyReason,
   configWatcherGlobs,
   configWatcherPatterns,
-  createEngineConfigAdapter,
   escapeGlobLiteral,
-  getConfigFileNames,
-} from '../src/config.js';
-import type { CSpellEngine, CSpellLib } from '../src/engine.js';
-import { cleanupTempDirs, createTempDir } from './helpers/workspace.js';
+} from '../../src/config/watcher.js';
+import { cleanupTempDirs, createTempDir } from '../helpers/workspace.js';
 
 afterEach(cleanupTempDirs);
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/');
 }
-
-function createEngine(lib: CSpellLib = cspellLib): CSpellEngine {
-  return {
-    mode: 'bundled',
-    version: 'test',
-    packagePath: '<bundled>',
-    lib,
-  };
-}
-
-function fakeConfigFile(
-  overrides: Record<string, unknown> = {},
-): ICSpellConfigFile {
-  return {
-    url: new URL('file:///workspace/cspell.json'),
-    settings: {},
-    ...overrides,
-  } as ICSpellConfigFile;
-}
-
-describe('engine configuration adapter', () => {
-  test('uses the selected engine config names', () => {
-    const adapter = createEngineConfigAdapter(createEngine());
-
-    expect(adapter.fileNames).toEqual([
-      ...new Set(cspellLib.defaultConfigFilenames),
-    ]);
-  });
-
-  test('uses a mock engine with a different config-name set', () => {
-    const lib = {
-      defaultConfigFilenames: [
-        'custom.json',
-        'nested/custom.yaml',
-        'custom.json',
-      ],
-      getDefaultConfigLoader: () => ({
-        clearCachedSettingsFiles() {},
-        async readConfigFile() {
-          return undefined;
-        },
-        async searchForConfigFileLocation() {
-          return undefined;
-        },
-      }),
-    } as unknown as CSpellLib;
-    const adapter = createEngineConfigAdapter(createEngine(lib));
-
-    expect(adapter.fileNames).toEqual(['custom.json', 'nested/custom.yaml']);
-    expect(configWatcherGlobs(adapter.fileNames)).toEqual([
-      '**/custom.json',
-      '**/nested/custom.yaml',
-    ]);
-  });
-
-  test('rejects engines without config names', () => {
-    const lib = { defaultConfigFilenames: [] } as unknown as CSpellLib;
-
-    expect(() => getConfigFileNames(createEngine(lib))).toThrow(
-      'defaultConfigFilenames',
-    );
-  });
-});
 
 describe('config watcher patterns', () => {
   test('groups config names by directory', () => {
@@ -279,40 +211,5 @@ describe('config watcher patterns', () => {
         pattern: `${normalizePath(path.dirname(explicitPath))}/cspell[[]1[]].yaml`,
       },
     ]);
-  });
-});
-
-describe('config writability', () => {
-  test('allows configs with an engine writer', () => {
-    expect(
-      configReadOnlyReason(fakeConfigFile({ serialize: () => '' })),
-    ).toBeUndefined();
-  });
-
-  test('explains read-only configs and guards', () => {
-    expect(configReadOnlyReason(fakeConfigFile({ readonly: true }))).toBe(
-      'the configuration is marked read-only.',
-    );
-    expect(
-      configReadOnlyReason(
-        fakeConfigFile({ remote: true, serialize: () => '' }),
-      ),
-    ).toBe('remote configuration files are read-only.');
-    expect(
-      configReadOnlyReason(
-        fakeConfigFile({ virtual: true, serialize: () => '' }),
-      ),
-    ).toBe('virtual configuration files are read-only.');
-    expect(
-      configReadOnlyReason(
-        fakeConfigFile({
-          error: new Error('invalid toml'),
-          serialize: () => '',
-        }),
-      ),
-    ).toBe('the configuration could not be parsed: invalid toml');
-    expect(configReadOnlyReason(fakeConfigFile())).toBe(
-      'the configuration has no safe writer.',
-    );
   });
 });

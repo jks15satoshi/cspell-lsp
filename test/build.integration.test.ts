@@ -80,7 +80,7 @@ test('builds when cspell-lib is hoisted to an ancestor node_modules', () => {
   writeFileSync(
     checkScript,
     [
-      "import { getBundledVersion } from './packages/cspell-lsp/src/engine.ts';",
+      "import { getBundledVersion } from './packages/cspell-lsp/src/engine/package.ts';",
       'console.log(`VERSION=${getBundledVersion()}`);',
       '',
     ].join('\n'),

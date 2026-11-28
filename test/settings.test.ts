@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import type { CSpellSettings } from 'cspell-lib';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
-import type { CSpellEngine, CSpellLib, EngineRegistry } from '../src/engine.js';
+import type { CSpellLib } from '../src/engine/package.js';
+import type { CSpellEngine, EngineRegistry } from '../src/engine/registry.js';
 import { SettingsResolver } from '../src/settings.js';
 
 function createResolver(options: { configPath?: string } = {}): {

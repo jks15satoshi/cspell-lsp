@@ -3,11 +3,9 @@ import type { TextDocument } from 'vscode-languageserver-textdocument';
 import type { Diagnostic } from 'vscode-languageserver-types';
 import { DiagnosticSeverity } from 'vscode-languageserver-types';
 
-import {
-  getApplicableExclusionGlobs,
-  getExclusionTarget,
-  type CSpellLib,
-} from './engine.js';
+import { getExclusionTarget } from './engine/documentPaths.js';
+import { getApplicableExclusionGlobs } from './engine/exclusions.js';
+import type { CSpellLib } from './engine/package.js';
 
 export type ExtensionId = 'cSpell';
 export const defaultCheckLimit = 1 << 20; // 1MB

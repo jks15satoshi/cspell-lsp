@@ -1,9 +1,8 @@
-import { fileURLToPath } from 'url';
-
 import type { CSpellSettings, CSpellUserSettings } from 'cspell-lib';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 
-import type { CSpellEngine, EngineRegistry } from './engine.js';
+import { getDocumentUriPath } from './engine/documentPaths.js';
+import type { CSpellEngine, EngineRegistry } from './engine/registry.js';
 
 export interface DocumentSettings {
   engine: CSpellEngine;
@@ -48,7 +47,7 @@ export class SettingsResolver {
     }
 
     const documentPath = textDocument.uri.startsWith('file:')
-      ? safeFileURLToPath(textDocument.uri)
+      ? getDocumentUriPath(textDocument.uri)
       : undefined;
 
     let config: CSpellSettings | undefined;
@@ -129,12 +128,4 @@ function normalizeDefaultIgnorePaths(
       typeof glob === 'string' ? { glob, root: globRoot } : glob,
     ),
   };
-}
-
-function safeFileURLToPath(uri: string): string | undefined {
-  try {
-    return fileURLToPath(uri);
-  } catch {
-    return undefined;
-  }
 }
