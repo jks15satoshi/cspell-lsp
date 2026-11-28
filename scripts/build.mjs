@@ -9,6 +9,9 @@ const result = await Bun.build({
   outdir: path.join(root, 'dist'),
   naming: 'cspell-lsp.js',
   target: 'node',
+  // Keep declared packages external so npm installs their code and licenses
+  // alongside the server instead of embedding third-party sources in dist.
+  packages: 'external',
   define: {
     CSPELL_LIB_VERSION: JSON.stringify(cspellLibPackage.version),
   },

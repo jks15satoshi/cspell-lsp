@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   symlinkSync,
   writeFileSync,
@@ -72,9 +73,13 @@ test('builds when cspell-lib is hoisted to an ancestor node_modules', () => {
       `Hoisted build failed:\n${build.stdout.toString()}\n${build.stderr.toString()}`,
     );
   }
-  expect(existsSync(path.join(packageRoot, 'dist', 'cspell-lsp.js'))).toBe(
-    true,
-  );
+  const builtEntry = path.join(packageRoot, 'dist', 'cspell-lsp.js');
+  expect(existsSync(builtEntry)).toBe(true);
+
+  const builtSource = readFileSync(builtEntry, 'utf8');
+  expect(builtSource).toMatch(/from ["']cspell-lib["']/);
+  expect(builtSource).toMatch(/from ["']cspell-glob["']/);
+  expect(builtSource).not.toMatch(/^\/\/ node_modules\//m);
 
   const checkScript = path.join(monorepoRoot, 'check-version.mjs');
   writeFileSync(

@@ -1,8 +1,11 @@
+import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import type { CSpellSettings, CSpellUserSettings } from 'cspell-lib';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 
+import { getDocumentUriPath } from './engine/documentPaths.js';
+import type { CSpellLib } from './engine/package.js';
 import type { CSpellEngine, EngineRegistry } from './engine/registry.js';
 
 export interface DocumentSettings {
@@ -49,16 +52,11 @@ export class SettingsResolver {
 
     const documentPath = textDocument.uri.startsWith('file:')
       ? safeFileURLToPath(textDocument.uri)
-      : undefined;
+      : getDocumentUriPath(textDocument.uri);
 
     let config: CSpellSettings | undefined;
     if (this.options.configPath) {
-      try {
-        config = await engine.lib.readSettings(this.options.configPath);
-      } catch {
-        // The configured file might not exist yet.
-        config = undefined;
-      }
+      config = await readExplicitConfig(engine.lib, this.options.configPath);
     } else if (documentPath) {
       config = await engine.lib
         .getDefaultConfigLoader()
@@ -105,6 +103,60 @@ export class SettingsResolver {
       this.engines.all().map((engine) => engine.lib.refreshDictionaryCache(0)),
     );
   }
+}
+
+/**
+ * Reads an explicit `--config` file and reports missing, unreadable, or
+ * malformed files instead of silently falling back to default settings.
+ *
+ * cspell-lib can return a settings object carrying import errors rather than
+ * throwing, and older engines may not expose the same error helpers. The
+ * readability check covers missing and permission failures for every engine;
+ * `extractImportErrors` adds parse errors when the selected engine provides it.
+ */
+async function readExplicitConfig(
+  lib: CSpellLib,
+  configPath: string,
+): Promise<CSpellSettings> {
+  try {
+    fs.accessSync(configPath, fs.constants.R_OK);
+  } catch (error) {
+    throw explicitConfigError(configPath, error);
+  }
+
+  let config: CSpellSettings;
+  try {
+    config = await lib.readSettings(configPath);
+  } catch (error) {
+    throw explicitConfigError(configPath, error);
+  }
+
+  const extractImportErrors = (
+    lib as unknown as {
+      extractImportErrors?: (settings: CSpellSettings) => { error?: Error }[];
+    }
+  ).extractImportErrors;
+  const importErrors = extractImportErrors?.(config) ?? [];
+  if (importErrors.length > 0) {
+    throw explicitConfigError(
+      configPath,
+      importErrors
+        .map((entry) => entry.error?.message ?? 'Unknown error')
+        .join('; '),
+    );
+  }
+  return config;
+}
+
+function explicitConfigError(configPath: string, error: unknown): Error {
+  return new Error(
+    `Failed to read CSpell config at ${configPath}: ${errorMessage(error)}`,
+    { cause: error },
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**

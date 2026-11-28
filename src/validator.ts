@@ -146,16 +146,27 @@ function isDocumentIgnored(
   cSpell: CSpellLib,
   fallbackRoot: string | undefined,
 ): boolean {
-  const ignorePaths = settings.ignorePaths;
+  // CSpell does not support negative ignore patterns; ExclusionHelper would
+  // apply them with last-match-wins semantics. Drop them so a pattern such as
+  // `!dist/keep/**` cannot un-ignore a path that `dist/**` already covers.
+  const ignorePaths = settings.ignorePaths?.filter((glob) => {
+    const pattern = typeof glob === 'string' ? glob : glob.glob;
+    return !pattern.startsWith('!');
+  });
   if (!ignorePaths?.length) return false;
   // The helper treats schemes outside this set as excluded, even when no glob
   // matches. Allow the document's own scheme so virtual documents are only
   // ignored when their path actually matches a configured pattern.
   const allowedSchemes = new Set(['file', 'untitled']);
-  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(uri)?.[1]?.toLowerCase();
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(uri);
+  const scheme = schemeMatch?.[1]?.toLowerCase();
   if (scheme) allowedSchemes.add(scheme);
+  const normalizedUri =
+    schemeMatch && scheme
+      ? `${scheme}:${uri.slice(schemeMatch[0].length)}`
+      : uri;
   const root = settings.globRoot ?? fallbackRoot ?? process.cwd();
-  const target = getExclusionTarget(uri);
+  const target = getExclusionTarget(normalizedUri);
   const globs = getApplicableExclusionGlobs(ignorePaths, root, target);
   if (!globs.length) return false;
   const isExcluded = cSpell.ExclusionHelper.generateExclusionFunctionForUri(

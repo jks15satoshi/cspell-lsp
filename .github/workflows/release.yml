@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.18.0'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.5'
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run build
+      - name: Verify tag matches package version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          expected_tag="v${package_version}"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${expected_tag}." >&2
+            exit 1
+          fi
+      - name: Verify tag is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Tag ${GITHUB_REF_NAME} does not point to a commit on main." >&2
+            exit 1
+          fi
+      - name: Verify package contents
+        id: pack
+        run: |
+          npm pack --dry-run --json --ignore-scripts > pack.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const packed = JSON.parse(fs.readFileSync('pack.json', 'utf8'));
+          const entry = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
+          if (!entry || !Array.isArray(entry.files)) {
+            throw new Error('npm pack did not report a package file list');
+          }
+          const manifest = require('./package.json');
+          const required = new Set([
+            'dist/cspell-lsp.js',
+            'README.md',
+            'LICENSE',
+            'NOTICE',
+            'package.json',
+            ...Object.values(manifest.bin ?? {}),
+          ]);
+          const files = new Set(entry.files.map((file) => file.path));
+          const missing = [...required].filter((path) => !files.has(path));
+          if (missing.length > 0) {
+            console.error(`Package is missing required files: ${missing.join(', ')}`);
+            process.exit(1);
+          }
+          if (typeof entry.integrity !== 'string' || typeof entry.shasum !== 'string') {
+            throw new Error('npm pack did not report integrity and shasum');
+          }
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `integrity=${entry.integrity}\nshasum=${entry.shasum}\n`,
+          );
+          console.log(`Verified ${required.size} required files in ${entry.files.length} packaged files.`);
+          NODE
+      - name: Check for an existing published version
+        id: published
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          local_integrity="${{ steps.pack.outputs.integrity }}"
+          local_shasum="${{ steps.pack.outputs.shasum }}"
+          if registry_json="$(npm view "${package_name}@${package_version}" dist.integrity dist.shasum --json 2>/dev/null)"; then
+            REGISTRY_JSON="$registry_json" LOCAL_INTEGRITY="$local_integrity" LOCAL_SHASUM="$local_shasum" node <<'NODE'
+          const data = JSON.parse(process.env.REGISTRY_JSON ?? 'null');
+          const entry = Array.isArray(data) ? data[0] : data;
+          const registryIntegrity = entry?.['dist.integrity'];
+          const registryShasum = entry?.['dist.shasum'];
+          const localIntegrity = process.env.LOCAL_INTEGRITY;
+          const localShasum = process.env.LOCAL_SHASUM;
+          if (
+            registryIntegrity !== localIntegrity ||
+            registryShasum !== localShasum
+          ) {
+            console.error(
+              'Refusing to skip publish: the registry version has a different artifact.',
+            );
+            console.error(`local integrity:    ${localIntegrity}`);
+            console.error(`registry integrity: ${registryIntegrity}`);
+            console.error(`local shasum:       ${localShasum}`);
+            console.error(`registry shasum:    ${registryShasum}`);
+            process.exit(1);
+          }
+          console.log('The published artifact matches the local pack.');
+          NODE
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+            echo "${package_name}@${package_version} is already published with a matching artifact; skipping publish."
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Publish to npm
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && steps.published.outputs.already_published != 'true'
+        run: npm publish --provenance --access public --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify published version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          local_integrity="${{ steps.pack.outputs.integrity }}"
+          local_shasum="${{ steps.pack.outputs.shasum }}"
+          for attempt in 1 2 3 4 5; do
+            if registry_json="$(npm view "${package_name}@${package_version}" dist.integrity dist.shasum --json 2>/dev/null)"; then
+              REGISTRY_JSON="$registry_json" LOCAL_INTEGRITY="$local_integrity" LOCAL_SHASUM="$local_shasum" node <<'NODE'
+          const data = JSON.parse(process.env.REGISTRY_JSON ?? 'null');
+          const entry = Array.isArray(data) ? data[0] : data;
+          const registryIntegrity = entry?.['dist.integrity'];
+          const registryShasum = entry?.['dist.shasum'];
+          const localIntegrity = process.env.LOCAL_INTEGRITY;
+          const localShasum = process.env.LOCAL_SHASUM;
+          if (
+            registryIntegrity !== localIntegrity ||
+            registryShasum !== localShasum
+          ) {
+            console.error('Published artifact does not match the local pack.');
+            console.error(`local integrity:    ${localIntegrity}`);
+            console.error(`registry integrity: ${registryIntegrity}`);
+            console.error(`local shasum:       ${localShasum}`);
+            console.error(`registry shasum:    ${registryShasum}`);
+            process.exit(1);
+          }
+          console.log('Published artifact matches the local pack.');
+          NODE
+              exit 0
+            fi
+            echo "Published version not visible yet (attempt ${attempt}/5)."
+            sleep 10
+          done
+          echo "Could not verify ${package_name}@${package_version} on the registry." >&2
+          exit 1
