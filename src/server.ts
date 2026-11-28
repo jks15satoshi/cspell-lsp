@@ -19,6 +19,7 @@ import {
 } from './codeActions.js';
 import { COMMANDS, createExecuteCommandHandler } from './commands.js';
 import { ConfigEditor } from './config/editor.js';
+import { DocumentGenerations } from './documentGenerations.js';
 import { EngineRegistry } from './engine/registry.js';
 import { SettingsResolver } from './settings.js';
 import { createConfigWatcher, type ConfigWatcher } from './watchers.js';
@@ -53,6 +54,7 @@ export function createServer(options: ServerOptions): CSpellServer {
   let hasRelativePatternSupport = false;
 
   let watchers: ConfigWatcher | undefined;
+  const validationGenerations = new DocumentGenerations();
 
   let engineRegistryPromise: Promise<EngineRegistry> | undefined;
   let settingsResolver: SettingsResolver | undefined;
@@ -163,6 +165,10 @@ export function createServer(options: ServerOptions): CSpellServer {
     void validateTextDocument(change.document);
   });
 
+  documents.onDidClose((change) => {
+    validationGenerations.delete(change.document.uri);
+  });
+
   interface DocumentContext extends CodeActionDocumentContext {
     /** Workspace path alias that matches the document, used to anchor ignore globs. */
     root?: string;
@@ -183,18 +189,23 @@ export function createServer(options: ServerOptions): CSpellServer {
   async function validateTextDocument(
     textDocument: TextDocument,
   ): Promise<void> {
+    const generation = validationGenerations.next(textDocument.uri);
     try {
       const { engine, settings, root } = await getDocumentContext(textDocument);
-      connection.sendDiagnostics({
-        uri: textDocument.uri,
-        diagnostics: await Validator.validateTextDocument(
-          textDocument,
-          settings,
-          engine.lib,
-          root,
-        ),
-      });
+      const diagnostics = await Validator.validateTextDocument(
+        textDocument,
+        settings,
+        engine.lib,
+        root,
+      );
+      if (!validationGenerations.isCurrent(textDocument.uri, generation)) {
+        return;
+      }
+      connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
     } catch (error) {
+      if (!validationGenerations.isCurrent(textDocument.uri, generation)) {
+        return;
+      }
       connection.console.error(
         `Failed to validate ${textDocument.uri}: ${errorMessage(error)}`,
       );

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { CSpellSettings } from 'cspell-lib';
+import * as path from 'node:path';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
 import type { CSpellLib } from '../src/engine/package.js';
@@ -95,7 +96,7 @@ describe('SettingsResolver', () => {
 
   test('uses an explicit config path when configured', async () => {
     const { resolver } = createResolver({
-      configPath: '/workspace/cspell.json',
+      configPath: path.resolve('package.json'),
     });
     const settings = await resolver.getForDocument(document);
 

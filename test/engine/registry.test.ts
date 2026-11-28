@@ -487,6 +487,35 @@ describe('EngineRegistry multi-root workspaces', () => {
     expect(engineMarker(registry, documentUri(outerRoot))).toBe('outer');
   });
 
+  test('uses the deepest nested root through a symlinked workspace', async () => {
+    const outerRoot = createTempDir();
+    const nestedReal = path.join(outerRoot, 'packages', 'app');
+    mkdirSync(nestedReal, { recursive: true });
+    const linkRoot = path.join(createTempDir(), 'workspace');
+    symlinkSync(
+      outerRoot,
+      linkRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const nestedLink = path.join(linkRoot, 'packages', 'app');
+    writeFakeCSpellLib(path.join(outerRoot, 'node_modules', 'cspell-lib'), {
+      version: '9.0.0',
+      marker: 'outer',
+    });
+    writeFakeCSpellLib(path.join(nestedReal, 'node_modules', 'cspell-lib'), {
+      version: '9.1.0',
+      marker: 'nested',
+    });
+
+    const { registry } = await createRegistry([linkRoot, nestedLink]);
+    const uri = documentUri(nestedLink, 'src/app.ts');
+
+    expect(engineMarker(registry, uri)).toBe('nested');
+    expect(registry.getForDocument(uri).version).toBe('9.1.0');
+    expect(registry.rootForDocument(uri)).toBe(nestedLink);
+    expect(registry.rootAliasForDocument(uri)).toBe(nestedLink);
+  });
+
   test('uses the bundled engine for documents outside every root', async () => {
     const root = createTempDir();
     writeFakeCSpellLib(path.join(root, 'node_modules', 'cspell-lib'), {
@@ -500,6 +529,49 @@ describe('EngineRegistry multi-root workspaces', () => {
     expect(registry.getForDocument(documentUri(outsideRoot)).packagePath).toBe(
       '<bundled>',
     );
+  });
+
+  test('prefers a nested real root over an aliased outer root', async () => {
+    const realOuter = createTempDir();
+    const nestedReal = path.join(realOuter, 'packages', 'nested');
+    mkdirSync(nestedReal, { recursive: true });
+    const outerLink = path.join(createTempDir(), 'outer-link');
+    symlinkSync(
+      realOuter,
+      outerLink,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    writeFakeCSpellLib(path.join(realOuter, 'node_modules', 'cspell-lib'), {
+      version: '9.0.0',
+      marker: 'outer',
+    });
+    writeFakeCSpellLib(path.join(nestedReal, 'node_modules', 'cspell-lib'), {
+      version: '9.1.0',
+      marker: 'nested',
+    });
+
+    const { registry } = await createRegistry([outerLink, nestedReal]);
+    const uri = documentUri(outerLink, 'packages/nested/src/app.ts');
+
+    expect(engineMarker(registry, uri)).toBe('nested');
+    expect(registry.getForDocument(uri).version).toBe('9.1.0');
+    expect(registry.rootForDocument(uri)).toBe(nestedReal);
+    expect(registry.rootAliasForDocument(uri)).toBe(
+      path.join(outerLink, 'packages', 'nested'),
+    );
+  });
+
+  test('keeps virtual documents outside every workspace on the bundled engine', async () => {
+    const root = createTempDir();
+    writeFakeCSpellLib(path.join(root, 'node_modules', 'cspell-lib'), {
+      version: '9.0.0',
+      marker: 'local',
+    });
+    const outsideRoot = createTempDir();
+    const uri = `git:${pathToFileURL(path.join(outsideRoot, 'src', 'app.ts')).pathname}`;
+
+    const { registry } = await createRegistry([root]);
+    expect(registry.getForDocument(uri).packagePath).toBe('<bundled>');
   });
 
   test('matches a symlinked root by logical and real document paths', async () => {

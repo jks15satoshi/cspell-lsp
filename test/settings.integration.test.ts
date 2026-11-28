@@ -207,6 +207,33 @@ describe('SettingsResolver with real cspell-lib', () => {
     ).toEqual([]);
   });
 
+  test('ignores negative ignorePaths like the CSpell CLI', async () => {
+    const root = createTempDir();
+    writeConfig(root, { ignorePaths: ['dist/**', '!dist/keep/**'] });
+    const resolver = createResolver();
+
+    for (const file of ['dist/fixture.md', 'dist/keep/fixture.md']) {
+      const document = createDocument(root, file);
+      const { settings, engine } = await resolver.getForDocument(document);
+      expect(
+        await validateTextDocument(document, settings, engine.lib, root),
+      ).toEqual([]);
+    }
+
+    const checkedDocument = createDocument(root, 'src/fixture.md');
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(
+          checkedDocument,
+          checked.settings,
+          checked.engine.lib,
+          root,
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
   test('uses ignorePaths from defaultSettings', async () => {
     const root = createTempDir();
     writeConfig(root, {});
@@ -360,6 +387,105 @@ describe('SettingsResolver with real cspell-lib', () => {
     ).toEqual([]);
 
     const checkedDocument = virtualDocument('src/fixture.md');
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      (
+        await validateTextDocument(
+          checkedDocument,
+          checked.settings,
+          checked.engine.lib,
+          registry.rootAliasForDocument(checkedDocument.uri),
+        )
+      ).map((diagnostic) => diagnostic.message),
+    ).toEqual([unknownWordDiagnostic]);
+  });
+
+  test('loads project settings and the workspace engine for virtual documents', async () => {
+    const root = createTempDir();
+    writeConfig(root, {
+      words: [unknownWord],
+      ignorePaths: ['ignored/**'],
+    });
+    writeRealCSpellLib(path.join(root, 'node_modules', 'cspell-lib'), {
+      marker: 'virtual-local',
+    });
+    const registry = await EngineRegistry.create({ roots: [root] });
+    const resolver = new SettingsResolver(registry);
+
+    const fileDocument = createDocument(root, 'ignored/fixture.md');
+    const virtualDocument = TextDocument.create(
+      `git:${pathToFileURL(path.join(root, 'ignored', 'fixture.md')).pathname}`,
+      'markdown',
+      1,
+      `This is a ${unknownWord} word.`,
+    );
+    const fileContext = await resolver.getForDocument(fileDocument);
+    const virtualContext = await resolver.getForDocument(virtualDocument);
+
+    expect(virtualContext.engine.packagePath).toBe(
+      fileContext.engine.packagePath,
+    );
+    expect(
+      (virtualContext.engine.lib as unknown as { marker?: string }).marker,
+    ).toBe('virtual-local');
+    expect(
+      await validateTextDocument(
+        virtualDocument,
+        virtualContext.settings,
+        virtualContext.engine.lib,
+        registry.rootAliasForDocument(virtualDocument.uri),
+      ),
+    ).toEqual([]);
+
+    const checkedDocument = TextDocument.create(
+      `git:${pathToFileURL(path.join(root, 'src', 'fixture.md')).pathname}`,
+      'markdown',
+      1,
+      `This is a ${unknownWord} word.`,
+    );
+    const checked = await resolver.getForDocument(checkedDocument);
+    expect(
+      await validateTextDocument(
+        checkedDocument,
+        checked.settings,
+        checked.engine.lib,
+        registry.rootAliasForDocument(checkedDocument.uri),
+      ),
+    ).toEqual([]);
+  });
+
+  test('normalizes mixed-case virtual URI schemes for ignore matching', async () => {
+    const root = createTempDir();
+    const registry = await EngineRegistry.create({
+      roots: [root],
+      engineOverride: 'bundled',
+    });
+    const resolver = new SettingsResolver(registry, {
+      defaultSettings: { ignorePaths: ['dist/**'] },
+    });
+    const document = TextDocument.create(
+      `GIT:${pathToFileURL(path.join(root, 'dist', 'fixture.md')).pathname}`,
+      'markdown',
+      1,
+      `This is a ${unknownWord} word.`,
+    );
+
+    const { engine, settings } = await resolver.getForDocument(document);
+    expect(
+      await validateTextDocument(
+        document,
+        settings,
+        engine.lib,
+        registry.rootAliasForDocument(document.uri),
+      ),
+    ).toEqual([]);
+
+    const checkedDocument = TextDocument.create(
+      `GIT:${pathToFileURL(path.join(root, 'src', 'fixture.md')).pathname}`,
+      'markdown',
+      1,
+      `This is a ${unknownWord} word.`,
+    );
     const checked = await resolver.getForDocument(checkedDocument);
     expect(
       (
@@ -886,6 +1012,27 @@ describe('SettingsResolver with real cspell-lib', () => {
       ).toEqual([]);
     });
   }
+
+  test('rejects a missing explicit config instead of using defaults', async () => {
+    const root = createTempDir();
+    const configPath = path.join(root, 'missing.json');
+    const resolver = createResolver({ configPath });
+
+    await expect(resolver.getForDocument(createDocument(root))).rejects.toThrow(
+      `Failed to read CSpell config at ${configPath}`,
+    );
+  });
+
+  test('rejects a malformed explicit config instead of using defaults', async () => {
+    const root = createTempDir();
+    const configPath = path.join(root, 'malformed.json');
+    writeFileSync(configPath, '{ "words": [\n');
+    const resolver = createResolver({ configPath });
+
+    await expect(resolver.getForDocument(createDocument(root))).rejects.toThrow(
+      `Failed to read CSpell config at ${configPath}`,
+    );
+  });
 
   test('loads and uses a real workspace-local cspell-lib', async () => {
     const root = createTempDir();

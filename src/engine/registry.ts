@@ -174,13 +174,13 @@ export class EngineRegistry {
       return this.findOwningRoot(filePath, useAlias);
     }
 
-    // Virtual documents are matched by the path in their URI. Only alias
-    // resolution uses this path; engine selection keeps using real files.
-    if (!useAlias) return undefined;
+    // Virtual documents are matched by the absolute path in their URI. The
+    // UNC guard runs before any real-path fallback so a virtual path cannot
+    // probe a host that no workspace names.
     const uriPath = getDocumentUriPath(uri);
     if (!uriPath) return undefined;
     if (!this.sharesWorkspaceServer(uriPath)) return undefined;
-    return this.findOwningRoot(uriPath, true);
+    return this.findOwningRoot(uriPath, useAlias);
   }
 
   /**
@@ -213,19 +213,31 @@ export class EngineRegistry {
   ): string | undefined {
     const absolute = path.resolve(filePath);
     const direct = this.matchRoot(absolute, useAlias);
-    if (direct) return direct;
 
-    // A client can address a real workspace through a symlinked path. Fall
-    // back to the containing directory's real path only when the URI itself
-    // did not match a root, so symlinked subdirectories keep their URI root.
+    // A client can address a real workspace through a symlinked path. Compare
+    // the URI match with the real-path match so a nested workspace wins over
+    // an outer workspace that happens to contain the URI alias.
     // Virtual documents can live in deleted directories, so resolve the
     // deepest existing ancestor and keep the unresolved suffix.
     const realParent = this.getRealPath(path.dirname(absolute));
-    if (!realParent) return undefined;
+    if (!realParent) return direct;
     const realPath = path.join(realParent, path.basename(absolute));
     const matched = this.matchRoot(realPath, useAlias);
-    if (!matched || !useAlias) return matched;
-    return this.aliasRootForPath(absolute, matched);
+    if (!matched) return direct;
+    if (!direct || this.isNestedRoot(matched, direct)) {
+      if (!useAlias) return matched;
+      return this.aliasRootForPath(absolute, matched);
+    }
+    return direct;
+  }
+
+  /** Returns true when `candidate` is a workspace nested inside `current`. */
+  private isNestedRoot(candidate: string, current: string): boolean {
+    const candidateReal = this.getRealPath(candidate) ?? candidate;
+    const currentReal = this.getRealPath(current) ?? current;
+    return (
+      candidateReal !== currentReal && isPathInside(candidateReal, currentReal)
+    );
   }
 
   /**

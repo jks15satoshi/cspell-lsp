@@ -1,13 +1,13 @@
 {
   "name": "@jks15satoshi/cspell-lsp",
-  "version": "1.1.4",
-  "description": "This extension performs spell checking in source code files, using the [cspell library](https://cspell.org/).",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "A language server that spell-checks source code with CSpell.",
   "type": "module",
   "bin": {
     "cspell-lsp": "dist/cspell-lsp.js"
   },
   "files": [
+    "dist",
     "NOTICE"
   ],
   "author": "Satoshi Jek",
@@ -20,10 +20,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@types/command-line-args": "^5.2.3",
     "command-line-args": "^6.0.1",
     "comment-json": "^4.2.5",
-    "cspell": "^10.5.2",
     "cspell-glob": "^10.5.2",
     "cspell-lib": "^10.5.2",
     "vscode-languageserver": "^9.0.1",
@@ -33,6 +31,7 @@
   },
   "devDependencies": {
     "@types/bun": "^1.4.5",
+    "@types/command-line-args": "^5.2.3",
     "@types/node": "^22.10.5",
     "eslint-plugin-tsdoc": "^0.5.4",
     "oxfmt": "^0.80.0",
