@@ -53,7 +53,7 @@ Configuration sources are merged in this order, with later sources taking preced
 3. `initializationOptions.defaultSettings`
 4. project configuration or the file passed with `--config`
 
-Files matching `ignorePaths` are not checked. Patterns from a configuration file are resolved relative to that file's `globRoot` or directory, including patterns declared by imported configurations.
+Files matching `ignorePaths` are not checked. Patterns from a configuration file are resolved relative to that file's `globRoot` or directory, including patterns declared by imported configurations. String patterns from `initializationOptions.defaultSettings` use its `globRoot` when set. Object patterns keep their own `root`; without one, they use the matching workspace folder. On Windows, a pattern rooted at a UNC path applies only to documents on the same server; patterns beginning with `**` are not tied to a server.
 
 The global configuration is read from `cspell.json` in:
 
