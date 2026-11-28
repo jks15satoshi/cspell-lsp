@@ -10,7 +10,8 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import type { Diagnostic } from 'vscode-languageserver-types';
 
 import { createOnCodeActionHandler } from '../src/codeActions.js';
-import type { CSpellEngine, CSpellLib } from '../src/engine.js';
+import type { CSpellLib } from '../src/engine/package.js';
+import type { CSpellEngine } from '../src/engine/registry.js';
 
 function createEngine(): CSpellEngine {
   const lib = {

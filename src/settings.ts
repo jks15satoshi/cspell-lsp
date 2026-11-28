@@ -1,9 +1,9 @@
-import { fileURLToPath } from 'url';
+import { fileURLToPath } from 'node:url';
 
 import type { CSpellSettings, CSpellUserSettings } from 'cspell-lib';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 
-import type { CSpellEngine, EngineRegistry } from './engine.js';
+import type { CSpellEngine, EngineRegistry } from './engine/registry.js';
 
 export interface DocumentSettings {
   engine: CSpellEngine;

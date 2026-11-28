@@ -31,10 +31,10 @@ function readCSpellLibPackage(packageRoot) {
   try {
     entry = Bun.resolveSync(
       'cspell-lib',
-      path.join(packageRoot, 'src', 'engine.ts'),
+      path.join(packageRoot, 'src', 'engine', 'package.ts'),
     );
   } catch (error) {
-    throw new Error('Unable to resolve cspell-lib from src/engine.ts', {
+    throw new Error('Unable to resolve cspell-lib from src/engine/package.ts', {
       cause: error,
     });
   }

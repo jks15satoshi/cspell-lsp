@@ -4,7 +4,7 @@ import { describe, expect, test } from 'bun:test';
 import type { CSpellSettings } from 'cspell-lib';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 
-import type { CSpellLib } from '../src/engine.js';
+import type { CSpellLib } from '../src/engine/package.js';
 import { validateTextDocument } from '../src/validator.js';
 
 function createFakeLib(): CSpellLib {

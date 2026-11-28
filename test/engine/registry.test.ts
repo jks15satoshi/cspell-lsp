@@ -9,14 +9,8 @@ import {
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import {
-  EngineLoadError,
-  EngineRegistry,
-  getApplicableExclusionGlobs,
-  getBundledVersion,
-  getDocumentUriPath,
-  getExclusionTarget,
-} from '../src/engine.js';
+import { getBundledVersion } from '../../src/engine/package.js';
+import { EngineLoadError, EngineRegistry } from '../../src/engine/registry.js';
 import {
   cleanupTempDirs,
   createTempDir,
@@ -24,7 +18,7 @@ import {
   writeConditionalCSpellLib,
   writeFakeCSpell,
   writeFakeCSpellLib,
-} from './helpers/workspace.js';
+} from '../helpers/workspace.js';
 
 afterEach(cleanupTempDirs);
 
@@ -49,12 +43,6 @@ async function createRegistry(
   });
   return { registry, logs };
 }
-
-describe('bundled engine version', () => {
-  test('resolves the installed version when it is not build-defined', () => {
-    expect(getBundledVersion()).toMatch(/^\d+\.\d+\.\d+/);
-  });
-});
 
 function writeConditionalPackage(
   root: string,
@@ -636,222 +624,4 @@ describe('EngineRegistry alias roots', () => {
       ).toBe('/c:/work');
     },
   );
-});
-
-describe('getDocumentUriPath platform semantics', () => {
-  test('maps a non-file authority to a UNC path on Windows', () => {
-    expect(
-      getDocumentUriPath('git://server/share/dist/fixture.md', 'win32'),
-    ).toBe('\\\\server\\share\\dist\\fixture.md');
-  });
-
-  test('keeps POSIX paths that resemble a Windows drive', () => {
-    expect(getDocumentUriPath('git:/c:/work/dist/fixture.md', 'linux')).toBe(
-      '/c:/work/dist/fixture.md',
-    );
-  });
-
-  test('keeps drive paths local on Windows without an authority', () => {
-    expect(getDocumentUriPath('git:/c:/work/dist/fixture.md', 'win32')).toBe(
-      'c:\\work\\dist\\fixture.md',
-    );
-  });
-
-  test('rejects relative URI paths', () => {
-    expect(
-      getDocumentUriPath('git:relative/fixture.md', 'linux'),
-    ).toBeUndefined();
-    expect(
-      getDocumentUriPath('git:relative/fixture.md', 'win32'),
-    ).toBeUndefined();
-  });
-});
-
-describe('getExclusionTarget platform semantics', () => {
-  test('uses the full UNC path for virtual documents on Windows', () => {
-    expect(
-      getExclusionTarget('git://server/share/dist/fixture.md', 'win32'),
-    ).toBe('\\\\server\\share\\dist\\fixture.md');
-  });
-
-  test('keeps non-authority and non-Windows URIs unchanged', () => {
-    expect(getExclusionTarget('git:/c:/work/dist/fixture.md', 'win32')).toBe(
-      'git:/c:/work/dist/fixture.md',
-    );
-    expect(
-      getExclusionTarget('git://server/share/dist/fixture.md', 'linux'),
-    ).toBe('git://server/share/dist/fixture.md');
-  });
-
-  test('leaves file and stdin URIs unchanged', () => {
-    expect(
-      getExclusionTarget('file://server/share/dist/fixture.md', 'win32'),
-    ).toBe('file://server/share/dist/fixture.md');
-    expect(getExclusionTarget('stdin://server/share/fixture.md', 'win32')).toBe(
-      'stdin://server/share/fixture.md',
-    );
-  });
-});
-
-describe('getApplicableExclusionGlobs', () => {
-  const serverA = '\\\\server-a\\share';
-  const serverB = '\\\\server-b\\share';
-  const targetA = path.win32.join(serverA, 'dist', 'fixture.md');
-  const targetB = path.win32.join(serverB, 'dist', 'fixture.md');
-
-  test('drops globs rooted on another UNC server', () => {
-    const globs = [
-      { glob: 'dist/**', root: serverA },
-      { glob: 'dist/**', root: serverB },
-      'dist/**',
-      { glob: '**/dist/**', root: serverA },
-      { glob: '!**/keep/**', root: serverA },
-      { glob: 'dist/**', root: 'file://server-a/share/' },
-    ];
-
-    expect(
-      getApplicableExclusionGlobs(globs, serverB, targetB, 'win32'),
-    ).toEqual([globs[1], globs[2], globs[3], globs[4]]);
-  });
-
-  test('keeps roots on the same server regardless of case', () => {
-    const glob = { glob: 'dist/**', root: '\\\\SERVER-A\\share' };
-
-    expect(
-      getApplicableExclusionGlobs([glob], serverB, targetA, 'win32'),
-    ).toEqual([glob]);
-  });
-
-  test('canonicalizes non-ASCII UNC server names', () => {
-    const server = '\\\\測試\\share';
-    const otherServer = '\\\\其他\\share';
-    const globs = [
-      { glob: 'dist/**', root: server },
-      { glob: 'dist/**', root: otherServer },
-      { glob: 'dist/**', root: 'file://測試/share/' },
-      { glob: 'dist/**', root: 'file://xn--g6w251d/share/' },
-    ];
-    const target = getExclusionTarget(
-      'git://測試/share/dist/fixture.md',
-      'win32',
-    );
-
-    expect(getApplicableExclusionGlobs(globs, server, target, 'win32')).toEqual(
-      [globs[0], globs[2], globs[3]],
-    );
-  });
-
-  test('uses the fallback root for string and relative glob roots', () => {
-    const relativeGlob = { glob: 'dist/**', root: 'sub' };
-
-    expect(
-      getApplicableExclusionGlobs(['dist/**'], serverA, targetB, 'win32'),
-    ).toEqual([]);
-    expect(
-      getApplicableExclusionGlobs([relativeGlob], serverA, targetB, 'win32'),
-    ).toEqual([]);
-    expect(
-      getApplicableExclusionGlobs([relativeGlob], serverB, targetB, 'win32'),
-    ).toEqual([relativeGlob]);
-  });
-
-  test('compares the server of file URL targets', () => {
-    const globs = [
-      { glob: 'dist/**', root: serverA },
-      { glob: 'dist/**', root: serverB },
-    ];
-
-    expect(
-      getApplicableExclusionGlobs(
-        globs,
-        serverB,
-        'file://server-b/share/dist/fixture.md',
-        'win32',
-      ),
-    ).toEqual([globs[1]]);
-  });
-
-  test('leaves globs unchanged without a Windows UNC target', () => {
-    const globs = [{ glob: 'dist/**', root: serverA }];
-
-    expect(
-      getApplicableExclusionGlobs(
-        globs,
-        serverA,
-        'file:///c:/work/dist/fixture.md',
-        'win32',
-      ),
-    ).toEqual(globs);
-    expect(
-      getApplicableExclusionGlobs(globs, serverB, targetA, 'linux'),
-    ).toEqual(globs);
-  });
-
-  test('uses the current directory for a ${cwd} glob prefix', () => {
-    const glob = { glob: '${cwd}/dist/**', root: serverA };
-
-    expect(
-      getApplicableExclusionGlobs([glob], serverB, targetB, 'win32', serverB),
-    ).toEqual([glob]);
-    expect(
-      getApplicableExclusionGlobs([glob], serverB, targetB, 'win32', serverA),
-    ).toEqual([]);
-  });
-
-  test('resolves a ${cwd} root before comparing servers', () => {
-    const glob = { glob: 'dist/**', root: '${cwd}' };
-    const nestedGlob = { glob: 'dist/**', root: '${cwd}/nested' };
-
-    expect(
-      getApplicableExclusionGlobs([glob], serverB, targetB, 'win32', serverA),
-    ).toEqual([]);
-    expect(
-      getApplicableExclusionGlobs([glob], serverB, targetB, 'win32', serverB),
-    ).toEqual([glob]);
-    expect(
-      getApplicableExclusionGlobs(
-        [nestedGlob],
-        serverB,
-        targetB,
-        'win32',
-        serverA,
-      ),
-    ).toEqual([]);
-    expect(
-      getApplicableExclusionGlobs(
-        [nestedGlob],
-        serverB,
-        targetB,
-        'win32',
-        serverB,
-      ),
-    ).toEqual([nestedGlob]);
-  });
-
-  test('normalizes four-slash UNC file URL roots', () => {
-    const glob = { glob: 'dist/**', root: 'file:////server-a/share/' };
-
-    expect(
-      getApplicableExclusionGlobs([glob], serverB, targetB, 'win32'),
-    ).toEqual([]);
-    expect(
-      getApplicableExclusionGlobs([glob], serverA, targetA, 'win32'),
-    ).toEqual([glob]);
-  });
-
-  test('recognizes four-slash UNC file URL targets', () => {
-    const globs = [
-      { glob: 'dist/**', root: serverA },
-      { glob: 'dist/**', root: serverB },
-    ];
-
-    expect(
-      getApplicableExclusionGlobs(
-        globs,
-        serverB,
-        'file:////server-b/share/dist/fixture.md',
-        'win32',
-      ),
-    ).toEqual([globs[1]]);
-  });
 });

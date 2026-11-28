@@ -14,17 +14,21 @@ import type {
   CSpellConfigFile,
   CSpellSettings,
   CSpellUserSettings,
+  ICSpellConfigFile,
 } from 'cspell-lib';
 
 import {
   ConfigEditError,
   ConfigEditor,
-  createEngineConfigAdapter,
+  configReadOnlyReason,
   type ConfigEditorOptions,
+} from '../../src/config/editor.js';
+import {
+  createEngineConfigAdapter,
   type EngineConfigAdapter,
-} from '../src/config.js';
-import type { CSpellEngine } from '../src/engine.js';
-import { cleanupTempDirs, createTempDir } from './helpers/workspace.js';
+} from '../../src/config/files.js';
+import type { CSpellEngine } from '../../src/engine/registry.js';
+import { cleanupTempDirs, createTempDir } from '../helpers/workspace.js';
 
 beforeEach(() => {
   cspellLib.getDefaultConfigLoader().clearCachedSettingsFiles();
@@ -39,6 +43,16 @@ function createEngine(): CSpellEngine {
     packagePath: '<bundled>',
     lib: cspellLib,
   };
+}
+
+function fakeConfigFile(
+  overrides: Record<string, unknown> = {},
+): ICSpellConfigFile {
+  return {
+    url: new URL('file:///workspace/cspell.json'),
+    settings: {},
+    ...overrides,
+  } as ICSpellConfigFile;
 }
 
 function createEngineWithLoader(
@@ -977,4 +991,39 @@ describe('ConfigEditor read-only guards', () => {
       expect(readText(configPath)).toBe(before);
     });
   }
+});
+
+describe('config writability', () => {
+  test('allows configs with an engine writer', () => {
+    expect(
+      configReadOnlyReason(fakeConfigFile({ serialize: () => '' })),
+    ).toBeUndefined();
+  });
+
+  test('explains read-only configs and guards', () => {
+    expect(configReadOnlyReason(fakeConfigFile({ readonly: true }))).toBe(
+      'the configuration is marked read-only.',
+    );
+    expect(
+      configReadOnlyReason(
+        fakeConfigFile({ remote: true, serialize: () => '' }),
+      ),
+    ).toBe('remote configuration files are read-only.');
+    expect(
+      configReadOnlyReason(
+        fakeConfigFile({ virtual: true, serialize: () => '' }),
+      ),
+    ).toBe('virtual configuration files are read-only.');
+    expect(
+      configReadOnlyReason(
+        fakeConfigFile({
+          error: new Error('invalid toml'),
+          serialize: () => '',
+        }),
+      ),
+    ).toBe('the configuration could not be parsed: invalid toml');
+    expect(configReadOnlyReason(fakeConfigFile())).toBe(
+      'the configuration has no safe writer.',
+    );
+  });
 });

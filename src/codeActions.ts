@@ -19,7 +19,7 @@ import {
   TextEdit,
 } from 'vscode-languageserver-types';
 
-import type { CSpellEngine } from './engine.js';
+import type { CSpellEngine } from './engine/registry.js';
 import * as Validator from './validator.js';
 
 function extractDiagnosticData(

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { cloneSettingsForConfig } from '../src/configWords.js';
+import { cloneSettingsForConfig } from '../../src/config/words.js';
 
 describe('cloneSettingsForConfig', () => {
   test('copies words arrays so adding and sorting do not mutate defaults', () => {
